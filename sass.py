@@ -135,6 +135,9 @@ def post_line(result: str) -> str:
         )
     if result == "no-links":
         return "🔁 Post <b>not updated</b> — there's nothing live left to point at."
+    if result == "network-error":
+        return ("🔁 Telegram was too slow to accept the edit just now. The post is "
+                "untouched; I'll update it on the next check.")
     if result == "no-post":
         return "🔁 No redirect post is set, so there was nothing to fix."
     return f"🔁 Post update failed: <code>{esc(result)}</code>"

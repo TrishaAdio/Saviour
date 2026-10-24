@@ -35,6 +35,9 @@ POST_SLOTS = _int("POST_SLOTS", 5)
 # Seconds between health checks of every loaded channel.
 CHECK_INTERVAL = _int("CHECK_INTERVAL", 300)
 
+# Seconds to wait for Telegram before a request counts as timed out.
+HTTP_TIMEOUT = _int("HTTP_TIMEOUT", 20)
+
 # Optional bold line above the links, used only for a plain ".set" (a reply
 # ".set" copies the original post exactly). "none" or empty = no title line,
 # which matches a post that is just the quote box of links.
