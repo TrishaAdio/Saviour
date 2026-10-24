@@ -265,3 +265,45 @@ def missing_rights(title, chat_id, report) -> str:
         "Tick <i>Invite Users via Link</i> and I'll add it on my own — "
         "no further involvement needed from you."
     )
+
+
+# ------------------------------------------------ ".set" adopted a post
+POST_ADOPTED: List[str] = [
+    "📌 Your <code>.set</code> message is now the redirect post in <b>{title}</b>. Edited in place, nothing new sent.",
+    "📌 Took your <code>.set</code> in <b>{title}</b> and turned it into the post. Recycling, essentially.",
+    "📌 <code>.set</code> consumed. <b>{title}</b> now has its redirect post, in the very same message.",
+]
+
+CANT_EDIT: List[str] = [
+    "I can't edit my own message there. Give me <i>Edit Messages</i> and try again.",
+    "Editing failed — I need the <i>Edit Messages</i> right in that channel.",
+    "That channel won't let me edit. Check my admin rights.",
+]
+
+
+def post_adopted(title, chat_id, slots) -> str:
+    if not config.SASS:
+        return (
+            f"📌 Redirect post set in <b>{esc(title)}</b> (<code>{chat_id}</code>) "
+            f"with {slots} link line(s) — your <code>.set</code> message was edited "
+            "in place.\nI'll keep it alive automatically."
+        )
+    return (
+        f"{pick(POST_ADOPTED, title=esc(title))}\n"
+        f"<code>{chat_id}</code> · <b>{slots}</b> link line(s)\n"
+        "I'll keep it alive from here. Change the count with <code>/slots N</code>."
+    )
+
+
+def cant_edit_set(chat_id, error) -> str:
+    if not config.SASS:
+        return (
+            f"⚠️ Couldn't edit the <code>.set</code> message in <code>{chat_id}</code>: "
+            f"{esc(error)}\nI need the <i>Edit Messages</i> admin right."
+        )
+    return (
+        f"⚠️ {pick(CANT_EDIT)}\n\n"
+        f"Channel: <code>{chat_id}</code>\n"
+        f"Telegram said: <code>{esc(error)}</code>\n"
+        "Your <code>.set</code> message is still sitting there, by the way."
+    )

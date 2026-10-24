@@ -70,6 +70,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "<code>/refresh</code> - re-render the post now\n"
         "<code>/remove</code> <code>&lt;id&gt;</code> - drop a channel\n"
         "<code>/active</code> <code>&lt;id&gt;</code> - choose the shown channel\n"
+        "<code>/slots</code> <code>&lt;n&gt;</code> - how many link lines to show\n"
         "<code>/sass</code> - preview the death notifications\n"
         "<code>/unset</code> - forget the redirect post\n\n"
         "In your public channel just post <code>.set</code>.",
@@ -194,6 +195,42 @@ async def cmd_sass(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def cmd_slots(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Change how many link lines the post shows, live."""
+    if not is_owner(update):
+        return
+    current = store.post["slots"] if store.post else config.POST_SLOTS
+    if not context.args:
+        await update.message.reply_text(
+            f"Post currently shows <b>{current}</b> link line(s).\n"
+            f"Default from <code>.env</code>: <b>{config.POST_SLOTS}</b>\n\n"
+            "Change it with <code>/slots 5</code>.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    try:
+        count = max(1, min(20, int(context.args[0])))
+    except ValueError:
+        await update.message.reply_text("Give me a number, e.g. <code>/slots 5</code>", parse_mode=ParseMode.HTML)
+        return
+
+    if not store.post:
+        await update.message.reply_text(
+            f"No post is set yet. Post <code>.set {count}</code> in your channel, "
+            f"or set <code>POST_SLOTS={count}</code> in <code>.env</code>.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    store.post["slots"] = count
+    await store.save()
+    result = await core.refresh_post(context.bot)
+    await update.message.reply_text(
+        f"Post now shows <b>{count}</b> link line(s). Result: <code>{result}</code>",
+        parse_mode=ParseMode.HTML,
+    )
+
+
 async def cmd_unset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_owner(update):
         return
@@ -207,7 +244,9 @@ async def on_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
     """Handles both the /load reply and the 'I ran out of links' reply."""
     if not is_owner(update):
         return
-    message = update.message
+    message = update.effective_message
+    if message is None:  # edited/odd update slipped through
+        return
     expecting = context.user_data.get("awaiting_load") or store.awaiting_links
     text = message.text or message.caption or ""
 
@@ -290,11 +329,6 @@ async def on_set_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         except ValueError:
             pass
 
-    try:
-        await context.bot.delete_message(chat_id, post.message_id)
-    except (BadRequest, Forbidden) as exc:
-        log.info("could not delete .set in %s: %s", chat_id, exc)
-
     # This channel displays the post, so it must not be one of its own targets
     # (auto-detect will have grabbed it when you promoted the bot here).
     if store.get_channel(chat_id):
@@ -306,18 +340,17 @@ async def on_set_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await notify_owner(context, sass.no_pool_on_set(post.chat.title or "?", chat_id))
         return
 
+    # Your ".set" message *becomes* the post - edited in place, nothing new sent.
     try:
-        message = await core.publish_post(context.bot, chat_id, slots)
+        adopted = await core.adopt_post(context.bot, chat_id, post.message_id, slots)
     except (BadRequest, Forbidden) as exc:
-        await notify_owner(context, sass.cant_post(chat_id, exc))
+        await notify_owner(context, sass.cant_edit_set(chat_id, exc))
         return
 
-    if message:
-        log.info("redirect post published in %s (msg %s)", chat_id, message.message_id)
+    if adopted:
         await notify_owner(
             context,
-            f"📌 Redirect post set in <b>{post.chat.title}</b> with {slots} link line(s).\n"
-            "I'll keep it alive automatically.",
+            sass.post_adopted(post.chat.title or str(chat_id), chat_id, slots),
         )
 
 
@@ -464,6 +497,27 @@ async def on_startup(app: Application) -> None:
         log.warning("startup DM failed (send /start to the bot once): %s", exc)
 
 
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Log anything unhandled and tell the owner instead of dying silently."""
+    log.error("unhandled exception", exc_info=context.error)
+    if not config.OWNER_ID:
+        return
+    err = context.error
+    where = ""
+    if isinstance(update, Update) and update.effective_chat:
+        where = f"\nChat: <code>{update.effective_chat.id}</code>"
+    try:
+        await context.bot.send_message(
+            config.OWNER_ID,
+            "💥 <b>Something broke.</b>\n"
+            f"<code>{sass.esc(type(err).__name__)}: {sass.esc(err)[:300]}</code>"
+            f"{where}\n\nI'm still running. Check <code>bot.log</code> for the traceback.",
+            parse_mode=ParseMode.HTML,
+        )
+    except Exception:  # never let the error handler raise
+        log.exception("could not report the error to the owner")
+
+
 def main() -> None:
     if not config.BOT_TOKEN:
         raise SystemExit("BOT_TOKEN missing — run: python3 setup.py")
@@ -472,15 +526,20 @@ def main() -> None:
 
     app = Application.builder().token(config.BOT_TOKEN).post_init(on_startup).build()
 
-    app.add_handler(CommandHandler("start", cmd_start, filters.ChatType.PRIVATE))
-    app.add_handler(CommandHandler("help", cmd_start, filters.ChatType.PRIVATE))
-    app.add_handler(CommandHandler("load", cmd_load, filters.ChatType.PRIVATE))
-    app.add_handler(CommandHandler("status", cmd_status, filters.ChatType.PRIVATE))
-    app.add_handler(CommandHandler("refresh", cmd_refresh, filters.ChatType.PRIVATE))
-    app.add_handler(CommandHandler("remove", cmd_remove, filters.ChatType.PRIVATE))
-    app.add_handler(CommandHandler("active", cmd_active, filters.ChatType.PRIVATE))
-    app.add_handler(CommandHandler("sass", cmd_sass, filters.ChatType.PRIVATE))
-    app.add_handler(CommandHandler("unset", cmd_unset, filters.ChatType.PRIVATE))
+    # UpdateType.MESSAGE keeps *edited* messages out: an edit leaves
+    # update.message as None, which used to crash the handlers.
+    private = filters.ChatType.PRIVATE & filters.UpdateType.MESSAGE
+
+    app.add_handler(CommandHandler("start", cmd_start, private))
+    app.add_handler(CommandHandler("help", cmd_start, private))
+    app.add_handler(CommandHandler("load", cmd_load, private))
+    app.add_handler(CommandHandler("status", cmd_status, private))
+    app.add_handler(CommandHandler("refresh", cmd_refresh, private))
+    app.add_handler(CommandHandler("remove", cmd_remove, private))
+    app.add_handler(CommandHandler("active", cmd_active, private))
+    app.add_handler(CommandHandler("slots", cmd_slots, private))
+    app.add_handler(CommandHandler("sass", cmd_sass, private))
+    app.add_handler(CommandHandler("unset", cmd_unset, private))
 
     app.add_handler(
         ChatMemberHandler(on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER)
@@ -493,10 +552,11 @@ def main() -> None:
     )
     app.add_handler(
         MessageHandler(
-            filters.ChatType.PRIVATE & ~filters.COMMAND & (filters.TEXT | filters.FORWARDED),
+            private & ~filters.COMMAND & (filters.TEXT | filters.FORWARDED),
             on_private_message,
         )
     )
+    app.add_error_handler(on_error)
 
     app.job_queue.run_repeating(
         health_check, interval=config.CHECK_INTERVAL, first=30, name="health_check"

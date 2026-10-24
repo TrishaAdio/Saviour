@@ -65,12 +65,12 @@ Set `AUTO_ADD=false` in `.env` to require `/load` instead.
    -1001234567890
    ```
    It verifies admin rights in each and replies **✅ Okay — access verified.**
-3. **Add the bot as admin** to your public channel (needs *Post* + *Edit* +
-   *Delete Messages*) and post:
+3. **Add the bot as admin** to your public channel (needs *Edit Messages*) and post:
    ```
    .set
    ```
-   The bot deletes your `.set` message and publishes the redirect post:
+   Your `.set` message is **edited in place** and becomes the redirect post —
+   nothing new is sent, nothing is deleted:
 
    > **Redirecting...**
    > ```
@@ -81,7 +81,8 @@ Set `AUTO_ADD=false` in `.env` to require `/load` instead.
    > https://t.me/+pbib86sOwyU1NjRh
    > ```
 
-   `.set 3` sets a different number of lines for that post.
+   The line count comes from `POST_SLOTS` in `.env` (default **5**). Override it
+   per post with `.set 3`, or change it live with `/slots 5`.
 4. From then on it checks every linked channel on a timer. A dead one is dropped
    and the post is **edited** to show the next backup's link.
 5. Pool empty → you get a DM: *"Hey bro, give me a link so I can update it."*
@@ -101,6 +102,7 @@ For a private channel, forward any post from it to the bot, or send its numeric
 | `/status` | pool, active channel, post location |
 | `/refresh` | re-render the post right now |
 | `/active <id>` | make that channel the one shown |
+| `/slots <n>` | change how many link lines the post shows |
 | `/remove <id>` | drop a channel from the pool |
 | `/sass` | preview the death notifications |
 | `/unset` | forget the redirect post |
