@@ -228,6 +228,17 @@ async def adopt_post(bot: Bot, chat_id: int, message_id: int, slots: int) -> boo
     return True
 
 
+# Telegram's many ways of saying "that message doesn't exist any more".
+POST_GONE = (
+    "message to edit not found",
+    "message to be edited not found",
+    "message can't be edited",
+    "message_id_invalid",
+    "message id invalid",
+    "message identifier is not specified",
+)
+
+
 async def refresh_post(bot: Bot) -> str:
     """Re-render the existing post in place. Returns a short status string."""
     post = store.post
@@ -251,12 +262,16 @@ async def refresh_post(bot: Bot) -> str:
         msg = (exc.message or "").lower()
         if "not modified" in msg:
             return "unchanged"
-        if "message to edit not found" in msg or "message can't be edited" in msg:
-            log.warning("redirect post gone (%s) - reposting", exc)
+        if any(marker in msg for marker in POST_GONE):
+            log.warning("redirect post %s in %s is gone (%s)",
+                        post["message_id"], post["chat_id"], exc)
+            chat_id, slots = post["chat_id"], post.get("slots", config.POST_SLOTS)
             store.clear_post()
             await store.save()
-            new = await publish_post(bot, post["chat_id"], post.get("slots", config.POST_SLOTS))
-            return "reposted" if new else "no-links"
+            if config.REPOST_IF_DELETED:
+                new = await publish_post(bot, chat_id, slots)
+                return "reposted" if new else "no-links"
+            return "post-gone"
         log.error("edit failed: %s", exc)
         return f"error: {exc.message}"
     except Forbidden as exc:

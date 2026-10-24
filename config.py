@@ -55,5 +55,9 @@ SASS = _bool("SASS", True)
 # Auto-add any channel the bot is promoted to admin in (no /load needed).
 AUTO_ADD = _bool("AUTO_ADD", True)
 
+# If the redirect post gets deleted: send a brand new one (true), or just
+# forget it and ask the owner to post ".set" again (false).
+REPOST_IF_DELETED = _bool("REPOST_IF_DELETED", False)
+
 DATA_FILE = BASE_DIR / "data.json"
 LOG_FILE = BASE_DIR / "bot.log"
