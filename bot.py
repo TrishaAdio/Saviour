@@ -480,11 +480,15 @@ async def notify_owner(context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
     if not config.OWNER_ID:
         return
     try:
-        await context.bot.send_message(
-            config.OWNER_ID, text, parse_mode=ParseMode.HTML, disable_web_page_preview=True
+        await core.with_retry(
+            context.bot.send_message, config.OWNER_ID, text,
+            parse_mode=ParseMode.HTML, disable_web_page_preview=True, what="owner DM",
         )
-    except (BadRequest, Forbidden) as exc:
+    except (BadRequest, Forbidden) as exc:  # first: BadRequest is a NetworkError
         log.error("cannot DM owner: %s", exc)
+    except core.TRANSIENT as exc:
+        log.error("owner DM lost after retries (%s): %s", type(exc).__name__,
+                  text.splitlines()[0][:120] if text else "")
 
 
 async def beg_if_empty(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -543,16 +547,23 @@ async def on_startup(app: Application) -> None:
             f"Pool: {len(store.channels)} · Post: {'set' if store.post else 'not set'}",
             parse_mode=ParseMode.HTML,
         )
-    except (BadRequest, Forbidden) as exc:
+    except (BadRequest, Forbidden) as exc:  # first: BadRequest is a NetworkError
         log.warning("startup DM failed (send /start to the bot once): %s", exc)
+    except core.TRANSIENT as exc:
+        log.warning("startup DM timed out, carrying on: %s", exc)
 
 
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Log anything unhandled and tell the owner instead of dying silently."""
-    log.error("unhandled exception", exc_info=context.error)
+    err = context.error
+    if core.is_transient(err):
+        # A slow or dropped connection to Telegram. Not a bug and nothing the
+        # owner can act on - one log line, no traceback, no DM.
+        log.warning("telegram network hiccup: %s: %s", type(err).__name__, err)
+        return
+    log.error("unhandled exception", exc_info=err)
     if not config.OWNER_ID:
         return
-    err = context.error
     where = ""
     if isinstance(update, Update) and update.effective_chat:
         where = f"\nChat: <code>{update.effective_chat.id}</code>"
@@ -574,7 +585,23 @@ def main() -> None:
     if not config.OWNER_ID:
         raise SystemExit("OWNER_ID missing — run: python3 setup.py")
 
-    app = Application.builder().token(config.BOT_TOKEN).post_init(on_startup).build()
+    # PTB's default HTTP timeouts are 5s, which a busy VPS link regularly
+    # exceeds (that was the TimedOut in the health check). Give Telegram room.
+    timeout = config.HTTP_TIMEOUT
+    app = (
+        Application.builder()
+        .token(config.BOT_TOKEN)
+        .connect_timeout(timeout)
+        .read_timeout(timeout)
+        .write_timeout(timeout)
+        .pool_timeout(timeout)
+        .get_updates_connect_timeout(timeout)
+        .get_updates_read_timeout(timeout)
+        .get_updates_write_timeout(timeout)
+        .get_updates_pool_timeout(timeout)
+        .post_init(on_startup)
+        .build()
+    )
 
     # UpdateType.MESSAGE keeps *edited* messages out: an edit leaves
     # update.message as None, which used to crash the handlers.

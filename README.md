@@ -143,6 +143,7 @@ nothing live left to point at"* rather than claiming a swap that never happened.
 | `POST_SLOTS` | `5` | link lines in the post |
 | `POST_TITLE` | `none` | bold line above the links (plain `.set` only); `none` = no title |
 | `CHECK_INTERVAL` | `300` | seconds between health checks |
+| `HTTP_TIMEOUT` | `20` | seconds to wait for Telegram before a request counts as timed out |
 | `LINK_MODE` | `single` | `single` = every line shows the active channel, rest held in reserve · `spread` = rotate lines across the whole pool |
 | `AUTO_ADD` | `true` | auto-pool any channel the bot is promoted in |
 | `REPOST_IF_DELETED` | `false` | if the post is deleted: send a new one (`true`) or ask you to `.set` again (`false`) |

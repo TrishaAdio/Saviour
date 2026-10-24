@@ -1,5 +1,6 @@
 """Channel resolving, invite-link handling and redirect-post rendering."""
 
+import asyncio
 import html
 import logging
 import re
@@ -16,6 +17,43 @@ from storage import store
 log = logging.getLogger(__name__)
 
 TRANSIENT = (TimedOut, NetworkError, RetryAfter)
+
+RETRY_ATTEMPTS = 3
+RETRY_BACKOFF = (2, 5)  # seconds to wait after attempt 1 and attempt 2
+
+
+def is_transient(exc: BaseException) -> bool:
+    """Network hiccup or flood limit - worth retrying. Real rejections are not.
+
+    BadRequest subclasses NetworkError in python-telegram-bot, so it has to be
+    ruled out explicitly or every rejection would look like a network error.
+    """
+    if isinstance(exc, (BadRequest, Forbidden)):
+        return False
+    return isinstance(exc, TRANSIENT)
+
+
+async def with_retry(call, *args, what: str = "telegram call", **kwargs):
+    """Run ``await call(*args, **kwargs)``, retrying network hiccups.
+
+    Timeouts and connection drops are retried with a short backoff; flood
+    limits wait the time Telegram asks for. Anything else (BadRequest,
+    Forbidden...) is raised immediately. After the last attempt the transient
+    error is raised so the caller can decide what to do.
+    """
+    for attempt in range(1, RETRY_ATTEMPTS + 1):
+        try:
+            return await call(*args, **kwargs)
+        except Exception as exc:
+            if not is_transient(exc) or attempt == RETRY_ATTEMPTS:
+                raise
+            if isinstance(exc, RetryAfter):
+                wait = float(getattr(exc, "retry_after", 5) or 5) + 1
+            else:
+                wait = RETRY_BACKOFF[min(attempt - 1, len(RETRY_BACKOFF) - 1)]
+            log.warning("%s: %s (attempt %s/%s) - retrying in %ss",
+                        what, type(exc).__name__, attempt, RETRY_ATTEMPTS, wait)
+            await asyncio.sleep(wait)
 
 # @name | t.me/name | https://t.me/name | -1001234567890 | t.me/+hash | t.me/joinchat/hash
 _USERNAME_RE = re.compile(r"(?:https?://)?(?:t(?:elegram)?\.me|telegram\.dog)/([A-Za-z]\w{3,31})/?")
@@ -73,13 +111,17 @@ async def bot_is_admin(bot: Bot, chat_id: Any) -> bool:
 async def fetch_invite_link(bot: Bot, chat_id: int, title: str) -> Optional[str]:
     """Prefer a public @username link, otherwise mint a fresh invite link."""
     try:
-        chat = await bot.get_chat(chat_id)
+        chat = await with_retry(bot.get_chat, chat_id, what=f"get_chat {chat_id}")
         if chat.username:
             return f"https://t.me/{chat.username}"
-        link = await bot.create_chat_invite_link(chat_id, name=title[:32] or "redirect")
+        link = await with_retry(bot.create_chat_invite_link, chat_id,
+                                name=title[:32] or "redirect", what="create invite link")
         return link.invite_link
-    except (BadRequest, Forbidden) as exc:
+    except (BadRequest, Forbidden) as exc:  # must come first: BadRequest is a NetworkError
         log.warning("invite link failed for %s: %s", chat_id, exc)
+        return None
+    except TRANSIENT as exc:
+        log.warning("invite link for %s still timing out after retries: %s", chat_id, exc)
         return None
 
 
@@ -155,8 +197,9 @@ async def verify_target(bot: Bot, target: Any) -> Dict[str, Any]:
 async def is_channel_alive(bot: Bot, channel: Dict[str, Any]) -> bool:
     """False only on a definite failure - transient network errors keep it alive."""
     try:
-        await bot.get_chat(channel["id"])
-        return await bot_is_admin(bot, channel["id"])
+        await with_retry(bot.get_chat, channel["id"], what=f"get_chat {channel['id']}")
+        return await with_retry(bot_is_admin, bot, channel["id"],
+                                what=f"admin check {channel['id']}")
     except (BadRequest, Forbidden) as exc:
         log.info("channel %s looks dead: %s", channel["id"], exc)
         return False
@@ -227,7 +270,8 @@ async def adopt_existing(bot: Bot, target: Message) -> Dict[str, Any]:
     if not links:
         return {"ok": False, "reason": "my link pool is empty"}
     try:
-        await edit_post(bot, target.chat_id, target.message_id, links, tpl)
+        await with_retry(edit_post, bot, target.chat_id, target.message_id, links, tpl,
+                         what="adopt post")
     except BadRequest as exc:
         if "not modified" not in (exc.message or "").lower():
             raise
@@ -262,13 +306,7 @@ async def adopt_post(bot: Bot, chat_id: int, message_id: int, slots: int) -> boo
     links = assign_slots(slots)
     if not links:
         return False
-    await bot.edit_message_text(
-        chat_id=chat_id,
-        message_id=message_id,
-        text=render_post(links),
-        parse_mode=ParseMode.HTML,
-        disable_web_page_preview=True,
-    )
+    await with_retry(edit_post, bot, chat_id, message_id, links, what="adopt .set")
     store.set_post(chat_id, message_id, slots)
     await store.save()
     log.info("adopted message %s in %s as the redirect post (%s lines)",
@@ -298,8 +336,8 @@ async def refresh_post(bot: Bot) -> str:
         return "no-links"
 
     try:
-        await edit_post(bot, post["chat_id"], post["message_id"], links,
-                        post.get("template"))
+        await with_retry(edit_post, bot, post["chat_id"], post["message_id"], links,
+                         post.get("template"), what="post edit")
         return "edited"
     except BadRequest as exc:
         msg = (exc.message or "").lower()
@@ -320,3 +358,9 @@ async def refresh_post(bot: Bot) -> str:
     except Forbidden as exc:
         log.error("lost access to the .set channel: %s", exc)
         return f"error: {exc}"
+    except TRANSIENT as exc:
+        # Telegram didn't answer in time even after retries. The post is fine
+        # as far as we know - keep it and try again on the next check.
+        log.warning("post edit still failing after %s attempts (%s) - will retry "
+                    "on the next check", RETRY_ATTEMPTS, type(exc).__name__)
+        return "network-error"
