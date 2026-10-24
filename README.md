@@ -30,11 +30,14 @@ You don't have to tell the bot anything. **Make it admin in a channel** and it
 notices immediately, checks its own rights, mints an invite link and adds the
 channel to the pool:
 
-> 👀 Noticed you made me admin in **Backup One**. I took the liberty of generating a link. You're welcome.
->
-> 🔗 https://t.me/+auto1001
-> Pool: **1**
-> 💪 Full rights — can host the `.set` post too.
+```
+🟢 Channel connected
+┃ Channel  Backup One
+┃ ID       -1001234567890
+┃ Invite   t.me/+AbCdEf123456
+┃ Access   Full admin
+┃ Pool     3 active
+```
 
 - Missing *Invite Users via Link* → it tells you exactly which permission to tick,
   and adds the channel by itself once you do.
@@ -89,50 +92,75 @@ Set `AUTO_ADD=false` in `.env` to require `/load` instead.
    per post with `.set 3`, or change it live with `/slots 5`.
 4. From then on it checks every linked channel on a timer. A dead one is dropped
    and the post is **edited** to show the next backup's link.
-5. Pool empty → you get a DM: *"Hey bro, give me a link so I can update it."*
-   Reply with new links in the same chat; it verifies them and updates the post
-   immediately — no `/load` needed.
+5. Pool empty → you get an *Action required · no live links* DM. Reply with new
+   links in the same chat; it verifies them and updates the post immediately,
+   no `/load` needed.
 
 ### Private invite links
 `t.me/+hash` / `t.me/joinchat/...` links **cannot** be resolved by any Telegram bot.
 For a private channel, forward any post from it to the bot, or send its numeric
 `-100…` id. The bot then generates its own invite link for that channel.
 
+## Control panel
+
+Send `/start` to the bot. You get one panel message with buttons:
+
+```
+📊 Status        📡 Channels · 3
+📝 Redirect post ➕ Add channels
+❔ How it works  ✕ Close
+```
+
+Every button **edits that same message**; nothing new is sent per click. Every
+screen has a **‹ Back** button. From the panel you can:
+
+- **Channels:** tap a channel to see its invite link, then **⭐ Make active** or
+  **🗑 Remove** (with a confirmation step)
+- **Redirect post:** **↻ Refresh links**, change the line count with **− / +**
+  (default-format posts), or **⏹ Stop monitoring**
+- **Status:** full overview, with **↻ Update**
+
+Only the owner can use the buttons.
+
 ## Commands (owner DM only)
+
+The panel covers all of these; the commands still work if you prefer typing.
 
 | command | |
 |---|---|
+| `/start` | open the control panel |
 | `/load` | verify and load backup channels |
 | `/status` | pool, active channel, post location |
 | `/refresh` | re-render the post right now |
 | `/active <id>` | make that channel the one shown |
 | `/slots <n>` | change how many link lines the post shows |
 | `/remove <id>` | drop a channel from the pool |
-| `/sass` | preview the death notifications |
-| `/unset` | forget the redirect post |
+| `/preview` | send sample notifications |
+| `/unset` | stop monitoring the post |
 
-## Death notifications
+## Notifications
 
-Every time a linked channel dies you get a DM — sarcastic by default, with a
-random line each time (never the same one twice in a row):
+Every DM uses the same card layout: a colour-coded title, a details panel, and
+at most one line telling you what happens next or what to do.
 
-> 💀 Shocking absolutely nobody, **Movies Backup 3** is gone.
-> `-1001234567890`
->
-> 🔁 Post **edited** — link swapped, formatting untouched.
-> Backups left: **2**. We'll live.
+| dot | meaning |
+|---|---|
+| 🟢 | done: channel connected, post linked |
+| 🔵 | info: startup, status |
+| 🟠 | needs attention: missing permission, channel disconnected |
+| 🔴 | critical: channel offline, no live links left |
 
-Thinning pool gets its own nagging, and running dry always keeps the line you
-asked for:
+```
+🔴 Channel offline
+┃ Channel  Movies Backup
+┃ ID       -1001234567890
+┃ Pool     2 active
+┃ Post     Updated
+```
 
-> 🆘 Congratulations, every single channel is dead. Impressive consistency.
->
-> **Hey bro, give me a link so I can update it.**
-> Send the link(s) in this chat. No `/load` needed — I'm not completely useless.
-
-Run `/sass` to preview all of them. Set `SASS=false` in `.env` for plain,
-humourless reports. The status line is always honest — it says *"not updated —
-nothing live left to point at"* rather than claiming a swap that never happened.
+When the pool runs dry you get a 🔴 *Action required · no live links* card.
+Paste a new channel link in the chat and the post is fixed immediately. Run
+`/preview` to see samples.
 
 ## `.env`
 
@@ -147,7 +175,6 @@ nothing live left to point at"* rather than claiming a swap that never happened.
 | `LINK_MODE` | `single` | `single` = every line shows the active channel, rest held in reserve · `spread` = rotate lines across the whole pool |
 | `AUTO_ADD` | `true` | auto-pool any channel the bot is promoted in |
 | `REPOST_IF_DELETED` | `false` | if the post is deleted: send a new one (`true`) or ask you to `.set` again (`false`) |
-| `SASS` | `true` | sarcastic death notifications |
 | `EXPANDABLE_QUOTE` | `false` | collapsible quote box (plain `.set` only) |
 | `MIN_CHANNELS` | `1` | beg the owner below this many live channels |
 
@@ -160,7 +187,8 @@ setup.py      colorama installer / screen launcher
 bot.py        handlers, watchdog job, owner pings
 core.py       link parsing, admin checks, post rendering + editing
 template.py   clones a post's formatting and swaps only its links
-sass.py       sarcastic notification lines
+ui.py         owner notification cards
+menu.py       inline-button control panel
 storage.py    JSON state
 config.py     .env loader
 ```

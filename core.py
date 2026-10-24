@@ -108,21 +108,28 @@ async def bot_is_admin(bot: Bot, chat_id: Any) -> bool:
     return member.status == ChatMemberStatus.ADMINISTRATOR
 
 
-async def fetch_invite_link(bot: Bot, chat_id: int, title: str) -> Optional[str]:
-    """Prefer a public @username link, otherwise mint a fresh invite link."""
+async def fetch_invite_link(bot: Bot, chat_id: int, title: str) -> Tuple[Optional[str], str]:
+    """Prefer a public @username link, otherwise mint a fresh invite link.
+
+    Returns ``(link, "")`` on success or ``(None, reason)`` so the owner is
+    told *why* it failed instead of a generic message.
+    """
     try:
         chat = await with_retry(bot.get_chat, chat_id, what=f"get_chat {chat_id}")
         if chat.username:
-            return f"https://t.me/{chat.username}"
+            return f"https://t.me/{chat.username}", ""
         link = await with_retry(bot.create_chat_invite_link, chat_id,
                                 name=title[:32] or "redirect", what="create invite link")
-        return link.invite_link
+        return link.invite_link, ""
     except (BadRequest, Forbidden) as exc:  # must come first: BadRequest is a NetworkError
         log.warning("invite link failed for %s: %s", chat_id, exc)
-        return None
+        raw = getattr(exc, "message", str(exc)) or str(exc)
+        if "not enough rights" in raw.lower() or "administrator" in raw.lower():
+            return None, "Missing Invite Users via Link permission"
+        return None, f"Telegram: {raw}"
     except TRANSIENT as exc:
         log.warning("invite link for %s still timing out after retries: %s", chat_id, exc)
-        return None
+        return None, "Telegram did not respond in time (network timeout)"
 
 
 # Right the bot absolutely needs to serve links from a channel.
@@ -152,9 +159,9 @@ def rights_report(member: Any) -> Dict[str, Any]:
 
 async def register_channel(bot: Bot, chat: Any, title: str) -> Dict[str, Any]:
     """Mint a link and drop the channel into the pool. Returns a status dict."""
-    link = await fetch_invite_link(bot, chat.id, title)
+    link, reason = await fetch_invite_link(bot, chat.id, title)
     if not link:
-        return {"ok": False, "reason": "could not create an invite link"}
+        return {"ok": False, "reason": reason}
     is_new = store.add_channel(chat.id, title or str(chat.id), chat.username, link)
     store.verified = True
     if store.channels:
@@ -170,24 +177,24 @@ async def verify_target(bot: Bot, target: Any) -> Dict[str, Any]:
         chat_id: Any = int(target) if str(target).lstrip("-").isdigit() else target
         chat = await bot.get_chat(chat_id)
     except (BadRequest, Forbidden) as exc:
-        result["reason"] = f"not reachable ({exc.message if hasattr(exc, 'message') else exc})"
+        result["reason"] = f"Not reachable ({getattr(exc, 'message', exc)})"
         return result
 
     if chat.type != "channel":
-        result["reason"] = f"this is a {chat.type}, not a channel"
+        result["reason"] = f"This is a {chat.type}, not a channel"
         return result
 
     try:
         if not await bot_is_admin(bot, chat.id):
-            result["reason"] = "bot is not an admin there"
+            result["reason"] = "I'm not admin there"
             return result
     except (BadRequest, Forbidden) as exc:
-        result["reason"] = f"admin check failed ({exc})"
+        result["reason"] = f"Admin check failed ({getattr(exc, 'message', exc)})"
         return result
 
-    link = await fetch_invite_link(bot, chat.id, chat.title or "")
+    link, reason = await fetch_invite_link(bot, chat.id, chat.title or "")
     if not link:
-        result["reason"] = "cannot create invite link (need 'Invite Users via Link' right)"
+        result["reason"] = reason
         return result
 
     result.update(ok=True, chat=chat, link=link)

@@ -200,9 +200,6 @@ def configure() -> dict:
     print(f"{D}                 'spread' = rotate lines across every loaded channel{X}")
     mode = ask("Link mode (single/spread)", current.get("LINK_MODE", "single")).lower()
     cfg["LINK_MODE"] = mode if mode in ("single", "spread") else "single"
-    sassy = ask("Sarcastic notifications when a link dies? (y/n)",
-                "y" if current.get("SASS", "true") == "true" else "n").lower()
-    cfg["SASS"] = "true" if sassy.startswith("y") else "false"
     cfg["EXPANDABLE_QUOTE"] = current.get("EXPANDABLE_QUOTE", "false")
     cfg["MIN_CHANNELS"] = current.get("MIN_CHANNELS", "1")
 

@@ -13,14 +13,17 @@ Flow
 5. Out of links -> it DMs the owner asking for new ones.
 """
 
+import html as _html
 import logging
-from typing import List
+import re
+from typing import Optional
 
 from telegram import Update
 from telegram.constants import ChatMemberStatus, ParseMode
 from telegram.error import BadRequest, Forbidden
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     ChatMemberHandler,
     CommandHandler,
     ContextTypes,
@@ -30,7 +33,8 @@ from telegram.ext import (
 
 import config
 import core
-import sass
+import menu
+import ui
 from storage import store
 
 logging.basicConfig(
@@ -41,15 +45,7 @@ logging.basicConfig(
 logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("redirect-bot")
 
-LOAD_HINT = (
-    "Send me the channels now - one per line. I accept:\n"
-    "• <code>@channelusername</code>\n"
-    "• <code>https://t.me/channelusername</code>\n"
-    "• <code>-1001234567890</code> (numeric id)\n"
-    "• or just <b>forward any post</b> from a private channel\n\n"
-    "Make sure I'm already an <b>admin</b> in each one with "
-    "<i>Invite Users via Link</i> permission."
-)
+LOAD_HINT = ui.load_prompt()
 
 
 def is_owner(update: Update) -> bool:
@@ -61,21 +57,7 @@ def is_owner(update: Update) -> bool:
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_owner(update):
         return
-    await update.message.reply_text(
-        "<b>Redirect Bot online.</b>\n\n"
-        "Just <b>make me admin</b> in a channel and I'll detect it, create an "
-        "invite link and add it to the pool by myself.\n\n"
-        "<code>/load</code> - add channels manually (for ones I'm already in)\n"
-        "<code>/status</code> - pool &amp; post status\n"
-        "<code>/refresh</code> - re-render the post now\n"
-        "<code>/remove</code> <code>&lt;id&gt;</code> - drop a channel\n"
-        "<code>/active</code> <code>&lt;id&gt;</code> - choose the shown channel\n"
-        "<code>/slots</code> <code>&lt;n&gt;</code> - how many link lines to show\n"
-        "<code>/sass</code> - preview the death notifications\n"
-        "<code>/unset</code> - forget the redirect post\n\n"
-        "In your public channel just post <code>.set</code>.",
-        parse_mode=ParseMode.HTML,
-    )
+    await send_screen(update, menu.home())
 
 
 async def cmd_load(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -88,111 +70,103 @@ async def cmd_load(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_owner(update):
         return
-    lines: List[str] = [f"<b>Pool:</b> {len(store.channels)} channel(s)"]
-    for index, channel in enumerate(store.channels):
-        tag = " ⭐ <i>active</i>" if index == 0 and config.LINK_MODE != "spread" else ""
-        lines.append(
-            f"• {channel['title']} — <code>{channel['id']}</code>{tag}\n"
-            f"  <a href=\"{channel['link']}\">link</a>"
-        )
-    post = store.post
-    lines.append("")
-    if post:
-        lines.append(
-            f"<b>Post:</b> chat <code>{post['chat_id']}</code> · "
-            f"msg <code>{post['message_id']}</code> · {post['slots']} slots"
-        )
-    else:
-        lines.append("<b>Post:</b> not set — post <code>.set</code> in your channel")
-    lines.append(f"<b>Verified:</b> {'yes' if store.verified else 'no'}")
-    lines.append(f"<b>Check every:</b> {config.CHECK_INTERVAL}s")
-    await update.message.reply_text(
-        "\n".join(lines), parse_mode=ParseMode.HTML, disable_web_page_preview=True
-    )
+    await send_screen(update, menu.status())
 
 
 async def cmd_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_owner(update):
         return
     result = await core.refresh_post(context.bot)
-    await update.message.reply_text(f"Refresh: <code>{result}</code>", parse_mode=ParseMode.HTML)
+    ok = result in ("edited", "unchanged")
+    reply = (ui.done("Post refreshed", [("Post", ui.post_status(result))]) if ok
+             else ui.problem("Refresh incomplete", ui.post_status(result)))
+    await update.message.reply_text(reply, parse_mode=ParseMode.HTML)
 
 
 async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_owner(update):
         return
-    if not context.args:
-        await update.message.reply_text("Usage: <code>/remove -1001234567890</code>", parse_mode=ParseMode.HTML)
+    chat_id = await _channel_arg(update, context, "/remove")
+    if chat_id is None:
         return
-    try:
-        chat_id = int(context.args[0])
-    except ValueError:
-        await update.message.reply_text("That's not a numeric channel id.")
-        return
-    if not store.get_channel(chat_id):
-        await update.message.reply_text("Not in the pool.")
-        return
+    channel = store.get_channel(chat_id)
     store.remove_channel(chat_id)
     await store.save()
     result = await core.refresh_post(context.bot)
     await update.message.reply_text(
-        f"Removed. Post: <code>{result}</code>", parse_mode=ParseMode.HTML
+        ui.done("Channel removed", [
+            ("Channel", f"<b>{ui.esc(channel['title'])}</b>"),
+            ("Pool", ui.pool_value(len(store.channels))),
+            ("Post", ui.post_status(result)),
+        ]),
+        parse_mode=ParseMode.HTML,
     )
     await beg_if_empty(context)
+
+
+async def _channel_arg(update: Update, context: ContextTypes.DEFAULT_TYPE, cmd: str):
+    """Parse and validate the channel id argument; reply and return None if bad."""
+    if not context.args:
+        await update.message.reply_text(
+            ui.problem("Channel id required", f"Usage: <code>{cmd} -1001234567890</code>. "
+                       "See /status for ids."),
+            parse_mode=ParseMode.HTML)
+        return None
+    try:
+        chat_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text(
+            ui.problem("Invalid channel id", "Use the numeric id shown in /status, "
+                       "e.g. <code>-1001234567890</code>."),
+            parse_mode=ParseMode.HTML)
+        return None
+    if not store.get_channel(chat_id):
+        await update.message.reply_text(
+            ui.problem("Channel not found", f"{ui.code(chat_id)} isn't connected. "
+                       "See /status."),
+            parse_mode=ParseMode.HTML)
+        return None
+    return chat_id
 
 
 async def cmd_active(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Move a channel to the front of the pool (it becomes the shown link)."""
     if not is_owner(update):
         return
-    if not context.args:
-        await update.message.reply_text(
-            "Usage: <code>/active -1001234567890</code>\n"
-            "Makes that channel the one shown in the post.",
-            parse_mode=ParseMode.HTML,
-        )
-        return
-    try:
-        chat_id = int(context.args[0])
-    except ValueError:
-        await update.message.reply_text("That's not a numeric channel id.")
+    chat_id = await _channel_arg(update, context, "/active")
+    if chat_id is None:
         return
     channel = store.get_channel(chat_id)
-    if not channel:
-        await update.message.reply_text("Not in the pool.")
-        return
     store.channels.remove(channel)
     store.channels.insert(0, channel)
     await store.save()
     result = await core.refresh_post(context.bot)
     await update.message.reply_text(
-        f"⭐ <b>{channel['title']}</b> is now active. Post: <code>{result}</code>",
-        parse_mode=ParseMode.HTML,
+        ui.done("Active channel changed", [
+            ("Channel", f"<b>{ui.esc(channel['title'])}</b>"),
+            ("Invite", ui.link(channel["link"])),
+            ("Post", ui.post_status(result)),
+        ]),
+        parse_mode=ParseMode.HTML, disable_web_page_preview=True,
     )
 
 
-async def cmd_sass(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Preview the notifications without having to kill a real channel."""
+async def cmd_preview(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show sample notifications without having to break a real channel."""
     if not is_owner(update):
         return
-    fake_one = [{"title": "Movies Backup 3", "id": -1001234567890}]
-    fake_many = [
-        {"title": "Movies Backup 3", "id": -1001234567890},
-        {"title": "Series Hub", "id": -1009876543210},
+    one = [{"title": "Movies Backup", "id": -1001234567890}]
+    full = {"full": True, "missing_post": [], "missing_link": []}
+    samples = [
+        ui.channel_connected("Movies Backup", -1001234567890,
+                             "https://t.me/+AbCdEf123456", True, full, 3, "edited", False),
+        ui.channels_offline(one, 2, "edited"),
+        ui.no_live_links(),
     ]
-    preview = (
-        f"<b>1 channel dies (2 backups left)</b>\n"
-        f"{sass.death_notice(fake_one, 2, 'edited')}\n\n"
-        f"<b>1 channel dies (1 backup left)</b>\n"
-        f"{sass.death_notice(fake_one, 1, 'edited')}\n\n"
-        f"<b>2 channels die</b>\n"
-        f"{sass.death_notice(fake_many, 3, 'edited')}\n\n"
-        f"<b>Out of links</b>\n{sass.beg_notice()}\n\n"
-        f"<i>SASS is {'on' if config.SASS else 'off'} — toggle with SASS=false in .env</i>"
-    )
-    await update.message.reply_text(
-        preview, parse_mode=ParseMode.HTML, disable_web_page_preview=True
-    )
+    for text in samples:
+        await update.message.reply_text(
+            text, parse_mode=ParseMode.HTML, disable_web_page_preview=True
+        )
 
 
 async def cmd_slots(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -200,44 +174,45 @@ async def cmd_slots(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_owner(update):
         return
     current = store.post["slots"] if store.post else config.POST_SLOTS
+
+    def say(text):
+        return update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
     if not context.args:
-        await update.message.reply_text(
-            f"Post currently shows <b>{current}</b> link line(s).\n"
-            f"Default from <code>.env</code>: <b>{config.POST_SLOTS}</b>\n\n"
-            "Change it with <code>/slots 5</code>.",
-            parse_mode=ParseMode.HTML,
-        )
+        await say(ui.card(ui.INFO, "Link lines", [
+            ("Current", str(current)),
+            ("Default", f"{config.POST_SLOTS} <i>(POST_SLOTS in .env)</i>"),
+        ], "Change it with <code>/slots 5</code>."))
         return
     try:
         count = max(1, min(20, int(context.args[0])))
     except ValueError:
-        await update.message.reply_text("Give me a number, e.g. <code>/slots 5</code>", parse_mode=ParseMode.HTML)
+        await say(ui.problem("Invalid number", "Example: <code>/slots 5</code>"))
         return
 
     if store.post and store.post.get("template"):
-        await update.message.reply_text(
-            "This post was taken over with a reply <code>.set</code>, so its line "
-            "count is whatever the original post has. Edit the post's links count "
-            "and reply <code>.set</code> to it again to change it.",
-            parse_mode=ParseMode.HTML,
-        )
+        await say(ui.problem(
+            "Line count follows your post",
+            "This post was linked by replying <code>.set</code>, so it keeps the "
+            "number of links it already has. Edit the post, then reply "
+            "<code>.set</code> to it again.",
+        ))
         return
 
     if not store.post:
-        await update.message.reply_text(
-            f"No post is set yet. Post <code>.set {count}</code> in your channel, "
-            f"or set <code>POST_SLOTS={count}</code> in <code>.env</code>.",
-            parse_mode=ParseMode.HTML,
-        )
+        await say(ui.problem(
+            "No post linked",
+            f"Send <code>.set {count}</code> in your channel, or set "
+            f"<code>POST_SLOTS={count}</code> in <code>.env</code>.",
+        ))
         return
 
     store.post["slots"] = count
     await store.save()
     result = await core.refresh_post(context.bot)
-    await update.message.reply_text(
-        f"Post now shows <b>{count}</b> link line(s). Result: <code>{result}</code>",
-        parse_mode=ParseMode.HTML,
-    )
+    await say(ui.done("Link lines updated", [
+        ("Lines", str(count)), ("Post", ui.post_status(result)),
+    ]))
 
 
 async def cmd_unset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -245,7 +220,135 @@ async def cmd_unset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     store.clear_post()
     await store.save()
-    await update.message.reply_text("Redirect post forgotten. Post <code>.set</code> again when ready.", parse_mode=ParseMode.HTML)
+    await update.message.reply_text(
+        ui.done("Monitoring stopped", (),
+                "The post is no longer tracked. Reply <code>.set</code> to a post "
+                "to start again."),
+        parse_mode=ParseMode.HTML,
+    )
+
+
+# -------------------------------------------------------- inline panel
+def _plain(html_text: str) -> str:
+    """Pop-up toasts can't show formatting; strip tags and unescape."""
+    return _html.unescape(re.sub(r"<[^>]+>", "", html_text))[:200]
+
+
+async def send_screen(update: Update, screen) -> None:
+    text, keyboard = screen
+    await update.message.reply_text(
+        text, parse_mode=ParseMode.HTML, reply_markup=keyboard,
+        disable_web_page_preview=True,
+    )
+
+
+async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Every panel button lands here and edits the same message in place."""
+    query = update.callback_query
+    if query is None or not query.data:
+        return
+    if not is_owner(update):
+        await query.answer("This panel is only for the bot owner.", show_alert=True)
+        return
+
+    _, action, *rest = query.data.split(":") + [""]
+    arg = rest[0] if rest else ""
+    toast = None
+    screen = None
+
+    def channel_id() -> Optional[int]:
+        try:
+            return int(arg)
+        except ValueError:
+            return None
+
+    if action == "home":
+        screen = menu.home()
+    elif action == "status":
+        screen = menu.status()
+    elif action == "chs":
+        screen = menu.channels(int(arg) if arg.lstrip("-").isdigit() else 0)
+    elif action in ("ch", "rm"):
+        cid = channel_id()
+        screen = (menu.channel(cid) if action == "ch" else menu.confirm_remove(cid)) \
+            if cid is not None else None
+        if screen is None:
+            toast, screen = "That channel is no longer connected.", menu.channels(0)
+    elif action == "act":
+        cid = channel_id()
+        ch = store.get_channel(cid) if cid is not None else None
+        if ch:
+            store.channels.remove(ch)
+            store.channels.insert(0, ch)
+            await store.save()
+            result = await core.refresh_post(context.bot)
+            toast = f"Now showing {ch['title']}. Post: {_plain(ui.post_status(result))}"
+            screen = menu.channel(cid)
+        else:
+            toast, screen = "That channel is no longer connected.", menu.channels(0)
+    elif action == "rmok":
+        cid = channel_id()
+        ch = store.get_channel(cid) if cid is not None else None
+        if ch:
+            store.remove_channel(cid)
+            await store.save()
+            result = await core.refresh_post(context.bot)
+            toast = f"Removed {ch['title']}. Post: {_plain(ui.post_status(result))}"
+        screen = menu.channels(0)
+    elif action == "post":
+        screen = menu.post()
+    elif action == "refresh":
+        result = await core.refresh_post(context.bot)
+        toast = _plain(ui.post_status(result))
+        screen = menu.post()
+    elif action == "lines":
+        post = store.post
+        if post and not post.get("template") and arg.isdigit():
+            post["slots"] = max(1, min(20, int(arg)))
+            await store.save()
+            result = await core.refresh_post(context.bot)
+            toast = f"{post['slots']} lines. Post: {_plain(ui.post_status(result))}"
+        screen = menu.post()
+    elif action == "unset":
+        screen = menu.confirm_unset() if store.post else menu.post()
+    elif action == "unsetok":
+        store.clear_post()
+        await store.save()
+        toast, screen = "Monitoring stopped.", menu.post()
+    elif action == "add":
+        context.user_data["awaiting_load"] = True
+        screen = menu.add()
+    elif action == "help":
+        screen = menu.help_screen()
+    elif action == "close":
+        await query.answer()
+        try:
+            await query.edit_message_text(menu.closed(), parse_mode=ParseMode.HTML)
+        except BadRequest:
+            pass
+        return
+    else:
+        screen = menu.home()
+
+    try:
+        await query.answer(toast)
+    except (BadRequest, core.TRANSIENT) as exc:  # answering late is harmless
+        log.info("callback answer skipped: %s", exc)
+
+    text, keyboard = screen
+    try:
+        await core.with_retry(
+            query.edit_message_text, text, parse_mode=ParseMode.HTML,
+            reply_markup=keyboard, disable_web_page_preview=True, what="panel edit",
+        )
+    except BadRequest as exc:
+        if "not modified" not in (exc.message or "").lower():
+            log.warning("panel edit failed: %s", exc)
+    except core.TRANSIENT as exc:
+        log.warning("panel edit timed out: %s", exc)
+
+    if action == "rmok":
+        await beg_if_empty(context)
 
 
 # ------------------------------------------------------ link ingestion
@@ -266,24 +369,22 @@ async def on_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if not targets:
         if unresolvable:
-            await message.reply_text(
-                "Those are private <code>t.me/+hash</code> invites — I can't resolve "
-                "those through the Bot API.\n\nForward me a post from that channel "
-                "instead, or send its numeric <code>-100…</code> id.",
-                parse_mode=ParseMode.HTML,
-            )
+            await message.reply_text(ui.private_invites_unsupported(), parse_mode=ParseMode.HTML)
         elif expecting:
             await message.reply_text(LOAD_HINT, parse_mode=ParseMode.HTML)
         return
 
-    status = await message.reply_text(f"Checking {len(targets)} channel(s)…")
+    status = await message.reply_text(
+        f"{ui.INFO} <b>Verifying {ui.plural(len(targets), 'channel')}…</b>",
+        parse_mode=ParseMode.HTML,
+    )
     added, refreshed, failed = [], [], []
 
     for target in targets:
         try:
             result = await core.verify_target(context.bot, target)
         except core.TRANSIENT as exc:
-            failed.append((str(target), f"network error ({exc})"))
+            failed.append((str(target), "Telegram did not respond, try again"))
             continue
         if not result["ok"]:
             failed.append((str(target), result["reason"]))
@@ -298,27 +399,13 @@ async def on_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await store.save()
     context.user_data["awaiting_load"] = False
 
-    lines: List[str] = []
-    if added or refreshed:
-        lines.append("✅ <b>Okay — access verified.</b>")
-    for name in added:
-        lines.append(f"  + {name}")
-    for name in refreshed:
-        lines.append(f"  ↻ {name} (link refreshed)")
-    for target, reason in failed:
-        lines.append(f"  ✖ <code>{target}</code> — {reason}")
-    for link in unresolvable:
-        lines.append(f"  ⚠️ <code>{link}</code> — forward a post from it instead")
-    lines.append(f"\n<b>Pool:</b> {len(store.channels)} channel(s)")
-
+    post_line = None
     if store.post and (added or refreshed):
-        result = await core.refresh_post(context.bot)
-        lines.append(f"<b>Post:</b> <code>{result}</code>")
-    elif not store.post:
-        lines.append("Now post <code>.set</code> in your public channel.")
+        post_line = ui.post_status(await core.refresh_post(context.bot))
 
     await status.edit_text(
-        "\n".join(lines), parse_mode=ParseMode.HTML, disable_web_page_preview=True
+        ui.load_result(added, refreshed, failed, unresolvable, len(store.channels), post_line),
+        parse_mode=ParseMode.HTML, disable_web_page_preview=True,
     )
 
 
@@ -346,7 +433,7 @@ async def on_set_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         log.info("%s hosts the post - removed it from the link pool", chat_id)
 
     if not store.channels:
-        await notify_owner(context, sass.no_pool_on_set(post.chat.title or "?", chat_id))
+        await notify_owner(context, ui.nothing_to_link(post.chat.title or "?", chat_id))
         return
 
     # ".set" sent as a REPLY -> take over the post you replied to, keep its
@@ -360,13 +447,12 @@ async def on_set_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     try:
         adopted = await core.adopt_post(context.bot, chat_id, post.message_id, slots)
     except (BadRequest, Forbidden) as exc:
-        await notify_owner(context, sass.cant_edit_set(chat_id, exc))
+        await notify_owner(context, ui.post_failed(chat_id, getattr(exc, "message", exc)))
         return
 
     if adopted:
         await notify_owner(
-            context,
-            sass.post_adopted(post.chat.title or str(chat_id), chat_id, slots),
+            context, ui.post_created(post.chat.title or str(chat_id), chat_id, slots)
         )
 
 
@@ -377,14 +463,11 @@ async def adopt_replied_post(context: ContextTypes.DEFAULT_TYPE, cmd, target) ->
     try:
         result = await core.adopt_existing(context.bot, target)
     except (BadRequest, Forbidden) as exc:
-        await notify_owner(context, sass.cant_edit_set(chat_id, exc))
+        await notify_owner(context, ui.post_failed(chat_id, getattr(exc, "message", exc)))
         return
     if not result["ok"]:
-        await notify_owner(
-            context,
-            f"⚠️ Can't take over that post in <b>{sass.esc(title)}</b>: "
-            f"{sass.esc(result['reason'])}.",
-        )
+        reason = result["reason"]
+        await notify_owner(context, ui.post_rejected(title, reason[:1].upper() + reason[1:]))
         return
 
     removed = True
@@ -394,9 +477,7 @@ async def adopt_replied_post(context: ContextTypes.DEFAULT_TYPE, cmd, target) ->
         removed = False
         log.info("could not delete the .set reply in %s: %s", chat_id, exc)
 
-    await notify_owner(
-        context, sass.post_taken_over(title, chat_id, result["slots"], removed)
-    )
+    await notify_owner(context, ui.post_linked(title, chat_id, result["slots"], removed))
 
 
 # ------------------------------------------- auto-detect channel joins
@@ -417,11 +498,7 @@ async def on_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     if chat.type != "channel":
         if status == ChatMemberStatus.ADMINISTRATOR and chat.type in ("group", "supergroup"):
-            await notify_owner(
-                context,
-                f"ℹ️ I was made admin in the group <b>{sass.esc(chat.title)}</b>, "
-                "but I only work with <b>channels</b>. Ignoring it.",
-            )
+            await notify_owner(context, ui.group_ignored(chat.title or chat.id))
         return
 
     # ---------------------------------------------------- lost access
@@ -435,7 +512,7 @@ async def on_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         reason = "demoted" if status == ChatMemberStatus.MEMBER else str(status)
         log.info("auto-removed %s (%s), post -> %s", chat.id, reason, result)
         await notify_owner(
-            context, sass.access_lost(channel, reason, len(store.channels), result)
+            context, ui.channel_disconnected(channel, reason, len(store.channels), result)
         )
         await beg_if_empty(context)
         return
@@ -452,25 +529,22 @@ async def on_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     title = chat.title or str(chat.id)
 
     if not report["can_link"]:
-        await notify_owner(context, sass.missing_rights(title, chat.id, report))
+        await notify_owner(context, ui.permission_required(title, chat.id, report))
         return
 
+    was_out_of_links = store.awaiting_links
     result = await core.register_channel(context.bot, chat, title)
     if not result["ok"]:
-        await notify_owner(
-            context,
-            f"⚠️ I'm admin in <b>{sass.esc(title)}</b> (<code>{chat.id}</code>) but "
-            f"{result['reason']}. Check my permissions there.",
-        )
+        await notify_owner(context, ui.invite_failed(title, chat.id, result["reason"]))
         return
 
     post_result = await core.refresh_post(context.bot) if store.post else "no-post"
     log.info("auto-added %s (%s), post -> %s", chat.id, title, post_result)
     await notify_owner(
         context,
-        sass.auto_added(
+        ui.channel_connected(
             title, chat.id, result["link"], result["new"], report,
-            len(store.channels), post_result,
+            len(store.channels), post_result, rescued=was_out_of_links,
         ),
     )
 
@@ -499,7 +573,7 @@ async def beg_if_empty(context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     store.awaiting_links = True
     await store.save()
-    await notify_owner(context, sass.beg_notice())
+    await notify_owner(context, ui.no_live_links())
 
 
 # ----------------------------------------------------------- watchdog
@@ -519,7 +593,7 @@ async def health_check(context: ContextTypes.DEFAULT_TYPE) -> None:
         await store.save()
 
         result = await core.refresh_post(context.bot)
-        await notify_owner(context, sass.death_notice(dead, len(store.channels), result))
+        await notify_owner(context, ui.channels_offline(dead, len(store.channels), result))
         log.info(
             "dead: %s | post -> %s | pool left %s",
             ", ".join(str(c["id"]) for c in dead),
@@ -530,7 +604,7 @@ async def health_check(context: ContextTypes.DEFAULT_TYPE) -> None:
         # Nothing died, but confirm the post still exists. Re-rendering an
         # unchanged post is a no-op ("not modified"), so this stays cheap.
         if await core.refresh_post(context.bot) == "post-gone":
-            await notify_owner(context, sass.post_vanished())
+            await notify_owner(context, ui.post_deleted())
 
     await beg_if_empty(context)
 
@@ -543,8 +617,7 @@ async def on_startup(app: Application) -> None:
     try:
         await app.bot.send_message(
             config.OWNER_ID,
-            f"🤖 <b>@{me.username} is up.</b>\n"
-            f"Pool: {len(store.channels)} · Post: {'set' if store.post else 'not set'}",
+            ui.startup(me.username, len(store.channels), bool(store.post)),
             parse_mode=ParseMode.HTML,
         )
     except (BadRequest, Forbidden) as exc:  # first: BadRequest is a NetworkError
@@ -564,16 +637,12 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     log.error("unhandled exception", exc_info=err)
     if not config.OWNER_ID:
         return
-    where = ""
+    chat_id = None
     if isinstance(update, Update) and update.effective_chat:
-        where = f"\nChat: <code>{update.effective_chat.id}</code>"
+        chat_id = update.effective_chat.id
     try:
         await context.bot.send_message(
-            config.OWNER_ID,
-            "💥 <b>Something broke.</b>\n"
-            f"<code>{sass.esc(type(err).__name__)}: {sass.esc(err)[:300]}</code>"
-            f"{where}\n\nI'm still running. Check <code>bot.log</code> for the traceback.",
-            parse_mode=ParseMode.HTML,
+            config.OWNER_ID, ui.unexpected_error(err, chat_id), parse_mode=ParseMode.HTML,
         )
     except Exception:  # never let the error handler raise
         log.exception("could not report the error to the owner")
@@ -615,9 +684,10 @@ def main() -> None:
     app.add_handler(CommandHandler("remove", cmd_remove, private))
     app.add_handler(CommandHandler("active", cmd_active, private))
     app.add_handler(CommandHandler("slots", cmd_slots, private))
-    app.add_handler(CommandHandler("sass", cmd_sass, private))
+    app.add_handler(CommandHandler("preview", cmd_preview, private))
     app.add_handler(CommandHandler("unset", cmd_unset, private))
 
+    app.add_handler(CallbackQueryHandler(on_menu, pattern=r"^m:"))
     app.add_handler(
         ChatMemberHandler(on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER)
     )
