@@ -24,9 +24,40 @@ owner id / post settings, writes `.env`, and starts the bot in a `screen` sessio
 | `python3 setup.py --logs` | tail `bot.log` |
 | `screen -r redirectbot` | attach to the live console (`Ctrl+A` then `D` to detach) |
 
+## Auto-detect
+
+You don't have to tell the bot anything. **Make it admin in a channel** and it
+notices immediately, checks its own rights, mints an invite link and adds the
+channel to the pool:
+
+> 👀 Noticed you made me admin in **Backup One**. I took the liberty of generating a link. You're welcome.
+>
+> 🔗 https://t.me/+auto1001
+> Pool: **1**
+> 💪 Full rights — can host the `.set` post too.
+
+- Missing *Invite Users via Link* → it tells you exactly which permission to tick,
+  and adds the channel by itself once you do.
+- Admin but no post/edit/delete rights → still used as a **link source**, just
+  flagged as unable to host the `.set` post.
+- **Demoted or removed** → dropped from the pool instantly and the post is fixed
+  on the spot, without waiting for the next health check.
+- Promoted again while the pool is empty → the post is repaired automatically and
+  the begging stops.
+- Added to a **group** instead of a channel → ignored, with a note.
+- The channel hosting the `.set` post is **never** added as one of its own targets.
+
+Set `AUTO_ADD=false` in `.env` to require `/load` instead.
+
+> Auto-detect fires on *future* promotions. For channels the bot is **already**
+> admin in, use `/load` once — Telegram sends no event for memberships that
+> predate the bot starting up, and the Bot API has no way to list them.
+
 ## Usage
 
 1. **Add the bot as admin** to each backup channel — it needs *Invite Users via Link*.
+   Auto-detect adds it to the pool right there; steps 2 is only for channels it
+   was already in before.
 2. DM the bot `/load`, then paste the channel links (one per line):
    ```
    @backup_one
@@ -107,6 +138,7 @@ nothing live left to point at"* rather than claiming a swap that never happened.
 | `POST_TITLE` | `Redirecting...` | bold first line |
 | `CHECK_INTERVAL` | `300` | seconds between health checks |
 | `LINK_MODE` | `single` | `single` = every line shows the active channel, rest held in reserve · `spread` = rotate lines across the whole pool |
+| `AUTO_ADD` | `true` | auto-pool any channel the bot is promoted in |
 | `SASS` | `true` | sarcastic death notifications |
 | `EXPANDABLE_QUOTE` | `true` | collapsible grey quote block |
 | `MIN_CHANNELS` | `1` | beg the owner below this many live channels |

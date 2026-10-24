@@ -17,10 +17,11 @@ import logging
 from typing import List
 
 from telegram import Update
-from telegram.constants import ParseMode
+from telegram.constants import ChatMemberStatus, ParseMode
 from telegram.error import BadRequest, Forbidden
 from telegram.ext import (
     Application,
+    ChatMemberHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -62,7 +63,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     await update.message.reply_text(
         "<b>Redirect Bot online.</b>\n\n"
-        "<code>/load</code> - verify + load backup channels\n"
+        "Just <b>make me admin</b> in a channel and I'll detect it, create an "
+        "invite link and add it to the pool by myself.\n\n"
+        "<code>/load</code> - add channels manually (for ones I'm already in)\n"
         "<code>/status</code> - pool &amp; post status\n"
         "<code>/refresh</code> - re-render the post now\n"
         "<code>/remove</code> <code>&lt;id&gt;</code> - drop a channel\n"
@@ -292,6 +295,13 @@ async def on_set_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     except (BadRequest, Forbidden) as exc:
         log.info("could not delete .set in %s: %s", chat_id, exc)
 
+    # This channel displays the post, so it must not be one of its own targets
+    # (auto-detect will have grabbed it when you promoted the bot here).
+    if store.get_channel(chat_id):
+        store.remove_channel(chat_id)
+        await store.save()
+        log.info("%s hosts the post - removed it from the link pool", chat_id)
+
     if not store.channels:
         await notify_owner(context, sass.no_pool_on_set(post.chat.title or "?", chat_id))
         return
@@ -309,6 +319,82 @@ async def on_set_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             f"📌 Redirect post set in <b>{post.chat.title}</b> with {slots} link line(s).\n"
             "I'll keep it alive automatically.",
         )
+
+
+# ------------------------------------------- auto-detect channel joins
+async def on_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Fires the moment the bot is added, promoted, demoted or removed.
+
+    Promoted to admin with 'Invite Users via Link'  ->  the channel is added to
+    the pool automatically, with a freshly minted invite link. No /load needed.
+    Demoted or removed  ->  it leaves the pool immediately and the post is fixed
+    without waiting for the next health check.
+    """
+    event = update.my_chat_member
+    if not event:
+        return
+    chat = event.chat
+    status = event.new_chat_member.status
+    was = event.old_chat_member.status if event.old_chat_member else None
+
+    if chat.type != "channel":
+        if status == ChatMemberStatus.ADMINISTRATOR and chat.type in ("group", "supergroup"):
+            await notify_owner(
+                context,
+                f"ℹ️ I was made admin in the group <b>{sass.esc(chat.title)}</b>, "
+                "but I only work with <b>channels</b>. Ignoring it.",
+            )
+        return
+
+    # ---------------------------------------------------- lost access
+    if status != ChatMemberStatus.ADMINISTRATOR:
+        channel = store.get_channel(chat.id)
+        if not channel:
+            return
+        store.remove_channel(chat.id)
+        await store.save()
+        result = await core.refresh_post(context.bot)
+        reason = "demoted" if status == ChatMemberStatus.MEMBER else str(status)
+        log.info("auto-removed %s (%s), post -> %s", chat.id, reason, result)
+        await notify_owner(
+            context, sass.access_lost(channel, reason, len(store.channels), result)
+        )
+        await beg_if_empty(context)
+        return
+
+    # ------------------------------------------------ promoted to admin
+    if not config.AUTO_ADD:
+        return
+    if store.post and chat.id == store.post["chat_id"]:
+        return  # this is the channel hosting the post - never link it to itself
+    if was == ChatMemberStatus.ADMINISTRATOR and store.get_channel(chat.id):
+        return  # rights were merely edited and we already have it
+
+    report = core.rights_report(event.new_chat_member)
+    title = chat.title or str(chat.id)
+
+    if not report["can_link"]:
+        await notify_owner(context, sass.missing_rights(title, chat.id, report))
+        return
+
+    result = await core.register_channel(context.bot, chat, title)
+    if not result["ok"]:
+        await notify_owner(
+            context,
+            f"⚠️ I'm admin in <b>{sass.esc(title)}</b> (<code>{chat.id}</code>) but "
+            f"{result['reason']}. Check my permissions there.",
+        )
+        return
+
+    post_result = await core.refresh_post(context.bot) if store.post else "no-post"
+    log.info("auto-added %s (%s), post -> %s", chat.id, title, post_result)
+    await notify_owner(
+        context,
+        sass.auto_added(
+            title, chat.id, result["link"], result["new"], report,
+            len(store.channels), post_result,
+        ),
+    )
 
 
 # --------------------------------------------------------- owner pings
@@ -396,6 +482,9 @@ def main() -> None:
     app.add_handler(CommandHandler("sass", cmd_sass, filters.ChatType.PRIVATE))
     app.add_handler(CommandHandler("unset", cmd_unset, filters.ChatType.PRIVATE))
 
+    app.add_handler(
+        ChatMemberHandler(on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER)
+    )
     app.add_handler(
         MessageHandler(
             filters.UpdateType.CHANNEL_POST & filters.Regex(r"^\s*\.set(\s|$)"),

@@ -168,3 +168,100 @@ def cant_post(chat_id: int, error) -> str:
         f"Channel: <code>{chat_id}</code>\n"
         f"Telegram said: <code>{esc(error)}</code>"
     )
+
+
+# ------------------------------------------------- auto-detected joins
+AUTO_ADDED: List[str] = [
+    "👀 Noticed you made me admin in <b>{title}</b>. I took the liberty of generating a link. You're welcome.",
+    "👀 New channel detected: <b>{title}</b>. Link minted, pool updated, no instructions required.",
+    "👀 <b>{title}</b> just appeared in my life. I've already made myself useful.",
+    "👀 Spotted <b>{title}</b>. Admin rights look fine, so I've grabbed a link. Efficiency, unlike some.",
+    "👀 Added to <b>{title}</b>. I've handled the paperwork myself — no <code>/load</code> needed.",
+]
+
+AUTO_RESCUE: List[str] = [
+    "🎉 And just in time — I was out of links and genuinely considering a career change.",
+    "🎉 The drought is over. The post points at something real again. Try to keep it that way.",
+    "🎉 Crisis resolved. The post is no longer a monument to nothing.",
+]
+
+ACCESS_LOST: List[str] = [
+    "🚪 I've been {reason} in <b>{title}</b>. Rude, but noted.",
+    "🚪 Someone {reason} me in <b>{title}</b>. I'll assume that was intentional.",
+    "🚪 No longer admin in <b>{title}</b> ({reason}). Dropped it from the pool before you could ask.",
+    "🚪 <b>{title}</b> showed me the door ({reason}). I've already moved on.",
+]
+
+MISSING_RIGHTS: List[str] = [
+    "🔒 You made me admin in <b>{title}</b> but forgot the one permission that matters.",
+    "🔒 Admin in <b>{title}</b>, yet somehow unable to do the single thing I exist for.",
+    "🔒 Promoted in <b>{title}</b> with impressive precision — every right except the useful one.",
+]
+
+
+def auto_added(title, chat_id, link, is_new, report, pool, post_result) -> str:
+    """Bot was auto-registered after being promoted in a channel."""
+    was_begging = pool == 1
+    if not config.SASS:
+        head = (
+            f"✅ Auto-added <b>{esc(title)}</b> (<code>{chat_id}</code>) — "
+            f"{'new' if is_new else 'link refreshed'}."
+        )
+    else:
+        head = pick(AUTO_ADDED, title=esc(title))
+        if not is_new:
+            head += "\n<i>(already knew this one — link refreshed)</i>"
+
+    lines = [head, "", f"🔗 <a href=\"{esc(link)}\">{esc(link)}</a>", f"Pool: <b>{pool}</b>"]
+
+    if report["missing_post"]:
+        lines.append(
+            "⚠️ Missing for hosting the post: <b>"
+            + ", ".join(report["missing_post"])
+            + "</b> — fine as a link source, can't host <code>.set</code>."
+        )
+    elif report["full"]:
+        lines.append("💪 Full rights — can host the <code>.set</code> post too.")
+
+    if post_result != "no-post":
+        lines.append(post_line(post_result))
+    if config.SASS and was_begging:
+        lines.append(pick(AUTO_RESCUE))
+    return "\n".join(lines)
+
+
+def access_lost(channel: dict, reason: str, left: int, post_result: str) -> str:
+    """Bot was demoted or removed from a pooled channel."""
+    if not config.SASS:
+        return (
+            f"⚠️ Lost admin in <b>{esc(channel['title'])}</b> "
+            f"(<code>{channel['id']}</code>) — {esc(reason)}.\n"
+            f"{post_line(post_result)}\nPool left: <b>{left}</b>"
+        )
+    lines = [
+        pick(ACCESS_LOST, title=esc(channel["title"]), reason=esc(reason)),
+        f"<code>{channel['id']}</code>",
+        "",
+        post_line(post_result),
+    ]
+    if left:
+        lines.append(pick(POOL_HEALTHY if left > 1 else POOL_THIN, left=left))
+    return "\n".join(lines)
+
+
+def missing_rights(title, chat_id, report) -> str:
+    """Promoted, but without the permission needed to create invite links."""
+    missing = ", ".join(report["missing_link"] + report["missing_post"])
+    if not config.SASS:
+        return (
+            f"⚠️ I'm admin in <b>{esc(title)}</b> (<code>{chat_id}</code>) but "
+            f"missing: <b>{esc(missing)}</b>.\nEnable it and I'll add the channel "
+            "automatically."
+        )
+    return (
+        f"{pick(MISSING_RIGHTS, title=esc(title))}\n"
+        f"<code>{chat_id}</code>\n\n"
+        f"Missing: <b>{esc(missing)}</b>\n"
+        "Tick <i>Invite Users via Link</i> and I'll add it on my own — "
+        "no further involvement needed from you."
+    )

@@ -82,6 +82,44 @@ async def fetch_invite_link(bot: Bot, chat_id: int, title: str) -> Optional[str]
         return None
 
 
+# Right the bot absolutely needs to serve links from a channel.
+LINK_RIGHT = ("can_invite_users", "Invite Users via Link")
+
+# Extra rights needed before a channel can host the ".set" redirect post.
+POST_RIGHTS = (
+    ("can_post_messages", "Post Messages"),
+    ("can_edit_messages", "Edit Messages"),
+    ("can_delete_messages", "Delete Messages"),
+)
+
+
+def rights_report(member: Any) -> Dict[str, Any]:
+    """What can this admin membership actually do?"""
+    attr, label = LINK_RIGHT
+    can_link = bool(getattr(member, attr, False))
+    missing_post = [name for key, name in POST_RIGHTS if not getattr(member, key, False)]
+    return {
+        "can_link": can_link,
+        "missing_link": [] if can_link else [label],
+        "missing_post": missing_post,
+        "can_host_post": not missing_post,
+        "full": can_link and not missing_post,
+    }
+
+
+async def register_channel(bot: Bot, chat: Any, title: str) -> Dict[str, Any]:
+    """Mint a link and drop the channel into the pool. Returns a status dict."""
+    link = await fetch_invite_link(bot, chat.id, title)
+    if not link:
+        return {"ok": False, "reason": "could not create an invite link"}
+    is_new = store.add_channel(chat.id, title or str(chat.id), chat.username, link)
+    store.verified = True
+    if store.channels:
+        store.awaiting_links = False
+    await store.save()
+    return {"ok": True, "new": is_new, "link": link}
+
+
 async def verify_target(bot: Bot, target: Any) -> Dict[str, Any]:
     """Resolve a target and confirm the bot is an admin there."""
     result: Dict[str, Any] = {"target": str(target), "ok": False, "reason": "", "chat": None}
