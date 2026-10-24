@@ -77,8 +77,12 @@ class Storage:
     def post(self) -> Optional[Dict[str, Any]]:
         return self.data["post"]
 
-    def set_post(self, chat_id: int, message_id: int, slots: int) -> None:
+    def set_post(self, chat_id: int, message_id: int, slots: int,
+                 template: Optional[Dict[str, Any]] = None) -> None:
         self.data["post"] = {"chat_id": chat_id, "message_id": message_id, "slots": slots}
+        if template:
+            # snapshot of the original post's text + entities (see template.py)
+            self.data["post"]["template"] = template
 
     def clear_post(self) -> None:
         self.data["post"] = None

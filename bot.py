@@ -214,6 +214,15 @@ async def cmd_slots(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("Give me a number, e.g. <code>/slots 5</code>", parse_mode=ParseMode.HTML)
         return
 
+    if store.post and store.post.get("template"):
+        await update.message.reply_text(
+            "This post was taken over with a reply <code>.set</code>, so its line "
+            "count is whatever the original post has. Edit the post's links count "
+            "and reply <code>.set</code> to it again to change it.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
     if not store.post:
         await update.message.reply_text(
             f"No post is set yet. Post <code>.set {count}</code> in your channel, "
@@ -340,7 +349,14 @@ async def on_set_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await notify_owner(context, sass.no_pool_on_set(post.chat.title or "?", chat_id))
         return
 
-    # Your ".set" message *becomes* the post - edited in place, nothing new sent.
+    # ".set" sent as a REPLY -> take over the post you replied to, keep its
+    # exact formatting, swap only its links, and remove the ".set" message.
+    target = post.reply_to_message
+    if target is not None:
+        await adopt_replied_post(context, post, target)
+        return
+
+    # Plain ".set" -> that message *becomes* the post, edited in place.
     try:
         adopted = await core.adopt_post(context.bot, chat_id, post.message_id, slots)
     except (BadRequest, Forbidden) as exc:
@@ -352,6 +368,35 @@ async def on_set_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             context,
             sass.post_adopted(post.chat.title or str(chat_id), chat_id, slots),
         )
+
+
+async def adopt_replied_post(context: ContextTypes.DEFAULT_TYPE, cmd, target) -> None:
+    """``.set`` replied to an existing post: edit that post, delete ``.set``."""
+    chat_id = cmd.chat_id
+    title = cmd.chat.title or str(chat_id)
+    try:
+        result = await core.adopt_existing(context.bot, target)
+    except (BadRequest, Forbidden) as exc:
+        await notify_owner(context, sass.cant_edit_set(chat_id, exc))
+        return
+    if not result["ok"]:
+        await notify_owner(
+            context,
+            f"⚠️ Can't take over that post in <b>{sass.esc(title)}</b>: "
+            f"{sass.esc(result['reason'])}.",
+        )
+        return
+
+    removed = True
+    try:
+        await context.bot.delete_message(chat_id, cmd.message_id)
+    except (BadRequest, Forbidden) as exc:
+        removed = False
+        log.info("could not delete the .set reply in %s: %s", chat_id, exc)
+
+    await notify_owner(
+        context, sass.post_taken_over(title, chat_id, result["slots"], removed)
+    )
 
 
 # ------------------------------------------- auto-detect channel joins

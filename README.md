@@ -65,12 +65,16 @@ Set `AUTO_ADD=false` in `.env` to require `/load` instead.
    -1001234567890
    ```
    It verifies admin rights in each and replies **✅ Okay — access verified.**
-3. **Add the bot as admin** to your public channel (needs *Edit Messages*) and post:
-   ```
-   .set
-   ```
-   Your `.set` message is **edited in place** and becomes the redirect post —
-   nothing new is sent, nothing is deleted:
+3. **Add the bot as admin** to your public channel (needs *Edit Messages*, plus
+   *Delete Messages* for the reply method).
+
+   **Already have a post? Reply `.set` to it.** The bot takes over *that* post,
+   copies its exact formatting (quote box, bold, emoji, hidden links, photo
+   caption, all of it) and swaps only the t.me links. Your `.set` reply is
+   deleted. The number of links stays whatever the post already had.
+
+   **No post yet? Just send `.set`.** That message is edited in place and
+   becomes the redirect post:
 
    > **Redirecting...**
    > ```
@@ -137,13 +141,13 @@ nothing live left to point at"* rather than claiming a swap that never happened.
 | `BOT_TOKEN` | — | from @BotFather |
 | `OWNER_ID` | — | your numeric id (@userinfobot) |
 | `POST_SLOTS` | `5` | link lines in the post |
-| `POST_TITLE` | `Redirecting...` | bold first line |
+| `POST_TITLE` | `none` | bold line above the links (plain `.set` only); `none` = no title |
 | `CHECK_INTERVAL` | `300` | seconds between health checks |
 | `LINK_MODE` | `single` | `single` = every line shows the active channel, rest held in reserve · `spread` = rotate lines across the whole pool |
 | `AUTO_ADD` | `true` | auto-pool any channel the bot is promoted in |
 | `REPOST_IF_DELETED` | `false` | if the post is deleted: send a new one (`true`) or ask you to `.set` again (`false`) |
 | `SASS` | `true` | sarcastic death notifications |
-| `EXPANDABLE_QUOTE` | `true` | collapsible grey quote block |
+| `EXPANDABLE_QUOTE` | `false` | collapsible quote box (plain `.set` only) |
 | `MIN_CHANNELS` | `1` | beg the owner below this many live channels |
 
 State lives in `data.json`, logs in `bot.log`.
@@ -154,6 +158,7 @@ State lives in `data.json`, logs in `bot.log`.
 setup.py      colorama installer / screen launcher
 bot.py        handlers, watchdog job, owner pings
 core.py       link parsing, admin checks, post rendering + editing
+template.py   clones a post's formatting and swaps only its links
 sass.py       sarcastic notification lines
 storage.py    JSON state
 config.py     .env loader

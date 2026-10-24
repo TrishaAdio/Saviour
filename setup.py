@@ -191,7 +191,8 @@ def configure() -> dict:
                               current.get("OWNER_ID"), cast=int))
     cfg["POST_SLOTS"] = str(ask("How many link lines in the post",
                                 current.get("POST_SLOTS", "5"), cast=int))
-    cfg["POST_TITLE"] = ask("Post title", current.get("POST_TITLE", "Redirecting..."))
+    cfg["POST_TITLE"] = ask("Title line above the links ('none' for no title)",
+                            current.get("POST_TITLE", "none"))
     cfg["CHECK_INTERVAL"] = str(ask("Health-check interval in seconds",
                                     current.get("CHECK_INTERVAL", "300"), cast=int))
     print(f"{D}      link mode: 'single' = all lines show the active channel"
@@ -202,7 +203,7 @@ def configure() -> dict:
     sassy = ask("Sarcastic notifications when a link dies? (y/n)",
                 "y" if current.get("SASS", "true") == "true" else "n").lower()
     cfg["SASS"] = "true" if sassy.startswith("y") else "false"
-    cfg["EXPANDABLE_QUOTE"] = current.get("EXPANDABLE_QUOTE", "true")
+    cfg["EXPANDABLE_QUOTE"] = current.get("EXPANDABLE_QUOTE", "false")
     cfg["MIN_CHANNELS"] = current.get("MIN_CHANNELS", "1")
 
     ENV.write_text(
