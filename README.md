@@ -141,6 +141,7 @@ nothing live left to point at"* rather than claiming a swap that never happened.
 | `CHECK_INTERVAL` | `300` | seconds between health checks |
 | `LINK_MODE` | `single` | `single` = every line shows the active channel, rest held in reserve · `spread` = rotate lines across the whole pool |
 | `AUTO_ADD` | `true` | auto-pool any channel the bot is promoted in |
+| `REPOST_IF_DELETED` | `false` | if the post is deleted: send a new one (`true`) or ask you to `.set` again (`false`) |
 | `SASS` | `true` | sarcastic death notifications |
 | `EXPANDABLE_QUOTE` | `true` | collapsible grey quote block |
 | `MIN_CHANNELS` | `1` | beg the owner below this many live channels |

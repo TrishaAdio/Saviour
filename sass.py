@@ -127,6 +127,12 @@ def post_line(result: str) -> str:
         return "🔁 Post <b>edited</b> — link swapped, formatting untouched."
     if result == "reposted":
         return "🔁 The post itself was deleted too, so I published a fresh one."
+    if result == "post-gone":
+        return (
+            "🔁 <b>The redirect post is gone</b> — deleted, by the look of it. "
+            "I've forgotten it; post <code>.set</code> again and I'll adopt the "
+            "new message."
+        )
     if result == "no-links":
         return "🔁 Post <b>not updated</b> — there's nothing live left to point at."
     if result == "no-post":
@@ -306,4 +312,24 @@ def cant_edit_set(chat_id, error) -> str:
         f"Channel: <code>{chat_id}</code>\n"
         f"Telegram said: <code>{esc(error)}</code>\n"
         "Your <code>.set</code> message is still sitting there, by the way."
+    )
+
+
+POST_VANISHED: List[str] = [
+    "🫥 The redirect post has vanished. Deleted, presumably by someone with access. Suspects: you.",
+    "🫥 My post is gone. I went to update it and found nothing there.",
+    "🫥 The redirect post no longer exists. I'd ask who deleted it, but I already know.",
+]
+
+
+def post_vanished() -> str:
+    """Noticed during a health check that the post itself is gone."""
+    if not config.SASS:
+        return (
+            "⚠️ The redirect post has been deleted. I've forgotten it — post "
+            "<code>.set</code> again in the channel and I'll adopt the new message."
+        )
+    return (
+        f"{pick(POST_VANISHED)}\n\n"
+        "Forgotten it. Post <code>.set</code> again and I'll take it from there."
     )

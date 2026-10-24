@@ -477,6 +477,11 @@ async def health_check(context: ContextTypes.DEFAULT_TYPE) -> None:
             result,
             len(store.channels),
         )
+    elif store.post:
+        # Nothing died, but confirm the post still exists. Re-rendering an
+        # unchanged post is a no-op ("not modified"), so this stays cheap.
+        if await core.refresh_post(context.bot) == "post-gone":
+            await notify_owner(context, sass.post_vanished())
 
     await beg_if_empty(context)
 
