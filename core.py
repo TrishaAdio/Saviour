@@ -10,6 +10,7 @@ from telegram.constants import ChatMemberStatus, ParseMode
 from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter, TimedOut
 
 import config
+import template
 from storage import store
 
 log = logging.getLogger(__name__)
@@ -181,13 +182,60 @@ def assign_slots(slots: int) -> List[str]:
 
 
 def render_post(links: List[str]) -> str:
-    """Exact formatting of the post - reused for edits so nothing visually shifts."""
+    """Default look, used only when there is no cloned post to copy."""
     body = "\n".join(html.escape(link) for link in links)
     tag = "blockquote expandable" if config.EXPANDABLE_QUOTE else "blockquote"
-    return (
-        f"<b>{html.escape(config.POST_TITLE)}</b>\n"
-        f"<{tag}>{body}</blockquote>"
+    title = (config.POST_TITLE or "").strip()
+    head = f"<b>{html.escape(title)}</b>\n" if title and title.lower() != "none" else ""
+    return f"{head}<{tag}>{body}</blockquote>"
+
+
+async def edit_post(bot: Bot, chat_id: int, message_id: int,
+                    links: List[str], tpl: Optional[Dict[str, Any]] = None) -> None:
+    """Write ``links`` into the post, keeping the cloned formatting if any."""
+    if tpl:
+        text, entities = template.render(tpl, links)
+        if tpl["kind"] == "caption":
+            await bot.edit_message_caption(
+                chat_id=chat_id, message_id=message_id,
+                caption=text, caption_entities=entities,
+            )
+        else:
+            await bot.edit_message_text(
+                chat_id=chat_id, message_id=message_id,
+                text=text, entities=entities, disable_web_page_preview=True,
+            )
+        return
+    await bot.edit_message_text(
+        chat_id=chat_id, message_id=message_id, text=render_post(links),
+        parse_mode=ParseMode.HTML, disable_web_page_preview=True,
     )
+
+
+async def adopt_existing(bot: Bot, target: Message) -> Dict[str, Any]:
+    """Take over a post you replied ``.set`` to, keeping its exact formatting.
+
+    Its line count is whatever the post already has (5 links -> 5 slots).
+    """
+    tpl = template.snapshot(target)
+    if tpl is None:
+        return {"ok": False, "reason": "that message has no text or caption to edit"}
+    slots = template.slot_count(tpl)
+    if slots == 0:
+        return {"ok": False, "reason": "that post has no t.me links for me to swap"}
+    links = assign_slots(slots)
+    if not links:
+        return {"ok": False, "reason": "my link pool is empty"}
+    try:
+        await edit_post(bot, target.chat_id, target.message_id, links, tpl)
+    except BadRequest as exc:
+        if "not modified" not in (exc.message or "").lower():
+            raise
+    store.set_post(target.chat_id, target.message_id, slots, tpl)
+    await store.save()
+    log.info("adopted existing post %s in %s (%s link slots, formatting cloned)",
+             target.message_id, target.chat_id, slots)
+    return {"ok": True, "slots": slots}
 
 
 async def publish_post(bot: Bot, chat_id: int, slots: int) -> Optional[Message]:
@@ -250,13 +298,8 @@ async def refresh_post(bot: Bot) -> str:
         return "no-links"
 
     try:
-        await bot.edit_message_text(
-            chat_id=post["chat_id"],
-            message_id=post["message_id"],
-            text=render_post(links),
-            parse_mode=ParseMode.HTML,
-            disable_web_page_preview=True,
-        )
+        await edit_post(bot, post["chat_id"], post["message_id"], links,
+                        post.get("template"))
         return "edited"
     except BadRequest as exc:
         msg = (exc.message or "").lower()

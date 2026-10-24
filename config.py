@@ -35,11 +35,13 @@ POST_SLOTS = _int("POST_SLOTS", 5)
 # Seconds between health checks of every loaded channel.
 CHECK_INTERVAL = _int("CHECK_INTERVAL", 300)
 
-# Title line of the redirect post.
-POST_TITLE = os.getenv("POST_TITLE", "Redirecting...")
+# Optional bold line above the links, used only for a plain ".set" (a reply
+# ".set" copies the original post exactly). "none" or empty = no title line,
+# which matches a post that is just the quote box of links.
+POST_TITLE = os.getenv("POST_TITLE", "none")
 
-# Use an expandable blockquote (the grey collapsible box in the screenshot).
-EXPANDABLE_QUOTE = _bool("EXPANDABLE_QUOTE", True)
+# Collapsible quote box instead of a plain one (plain .set only).
+EXPANDABLE_QUOTE = _bool("EXPANDABLE_QUOTE", False)
 
 # "single" -> every line shows the active channel's link (like your screenshot),
 #             the rest of the pool sits in reserve for when it dies.

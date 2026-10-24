@@ -333,3 +333,29 @@ def post_vanished() -> str:
         f"{pick(POST_VANISHED)}\n\n"
         "Forgotten it. Post <code>.set</code> again and I'll take it from there."
     )
+
+
+TAKEN_OVER: List[str] = [
+    "📌 Took over your post in <b>{title}</b>. Same look, fresh links. Nobody will ever know.",
+    "📌 Your post in <b>{title}</b> is mine now. Formatting untouched, links swapped.",
+    "📌 Adopted the post in <b>{title}</b>. Copied its style exactly, because apparently I have taste.",
+]
+
+
+def post_taken_over(title, chat_id, slots, removed_set: bool) -> str:
+    """.set was a reply: the replied post was edited in place."""
+    tail = (
+        "Your <code>.set</code> message is deleted."
+        if removed_set else
+        "I couldn't delete your <code>.set</code> message (give me <i>Delete Messages</i>), "
+        "so remove it yourself."
+    )
+    if not config.SASS:
+        return (
+            f"📌 Post in <b>{esc(title)}</b> (<code>{chat_id}</code>) taken over — "
+            f"original formatting kept, {slots} link(s) updated.\n{tail}"
+        )
+    return (
+        f"{pick(TAKEN_OVER, title=esc(title))}\n"
+        f"<code>{chat_id}</code> · <b>{slots}</b> link(s)\n{tail}"
+    )
