@@ -52,5 +52,8 @@ MIN_CHANNELS = _int("MIN_CHANNELS", 1)
 # Sarcastic owner notifications. Set to false for dry, professional misery.
 SASS = _bool("SASS", True)
 
+# Auto-add any channel the bot is promoted to admin in (no /load needed).
+AUTO_ADD = _bool("AUTO_ADD", True)
+
 DATA_FILE = BASE_DIR / "data.json"
 LOG_FILE = BASE_DIR / "bot.log"
