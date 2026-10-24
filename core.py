@@ -205,6 +205,29 @@ async def publish_post(bot: Bot, chat_id: int, slots: int) -> Optional[Message]:
     return message
 
 
+async def adopt_post(bot: Bot, chat_id: int, message_id: int, slots: int) -> bool:
+    """Turn an existing message (your ``.set``) into the redirect post.
+
+    Nothing new is sent - the message you typed is edited in place and becomes
+    the post the bot keeps alive from then on.
+    """
+    links = assign_slots(slots)
+    if not links:
+        return False
+    await bot.edit_message_text(
+        chat_id=chat_id,
+        message_id=message_id,
+        text=render_post(links),
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True,
+    )
+    store.set_post(chat_id, message_id, slots)
+    await store.save()
+    log.info("adopted message %s in %s as the redirect post (%s lines)",
+             message_id, chat_id, len(links))
+    return True
+
+
 async def refresh_post(bot: Bot) -> str:
     """Re-render the existing post in place. Returns a short status string."""
     post = store.post
