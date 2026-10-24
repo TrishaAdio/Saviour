@@ -247,29 +247,6 @@ def nothing_to_link(title, chat_id) -> str:
 
 
 # ----------------------------------------------------------- commands
-def help_menu() -> str:
-    cmds = [
-        ("/status", "Pool and post overview"),
-        ("/load", "Add channels by link or id"),
-        ("/active &lt;id&gt;", "Choose the channel shown"),
-        ("/remove &lt;id&gt;", "Remove a channel"),
-        ("/slots &lt;n&gt;", "Link lines in the post"),
-        ("/refresh", "Re-apply links to the post"),
-        ("/unset", "Stop monitoring the post"),
-        ("/preview", "Sample notifications"),
-    ]
-    return (
-        f"{INFO} <b>Saviour</b>\n"
-        "<blockquote><b>1.</b> Make me admin in your backup channels. They "
-        "connect automatically.\n"
-        "<b>2.</b> In your public channel, reply <code>.set</code> to your "
-        "redirect post.\n"
-        "<b>3.</b> When a channel goes down, I swap the link and notify you."
-        "</blockquote>\n"
-        + "\n".join(f"<code>{c}</code>  {d}" for c, d in cmds)
-    )
-
-
 def load_prompt() -> str:
     return card(INFO, "Add channels", (),
                 "Send them one per line. I must already be admin in each, with "

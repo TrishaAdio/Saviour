@@ -101,10 +101,34 @@ Set `AUTO_ADD=false` in `.env` to require `/load` instead.
 For a private channel, forward any post from it to the bot, or send its numeric
 `-100…` id. The bot then generates its own invite link for that channel.
 
+## Control panel
+
+Send `/start` to the bot. You get one panel message with buttons:
+
+```
+📊 Status        📡 Channels · 3
+📝 Redirect post ➕ Add channels
+❔ How it works  ✕ Close
+```
+
+Every button **edits that same message**; nothing new is sent per click. Every
+screen has a **‹ Back** button. From the panel you can:
+
+- **Channels:** tap a channel to see its invite link, then **⭐ Make active** or
+  **🗑 Remove** (with a confirmation step)
+- **Redirect post:** **↻ Refresh links**, change the line count with **− / +**
+  (default-format posts), or **⏹ Stop monitoring**
+- **Status:** full overview, with **↻ Update**
+
+Only the owner can use the buttons.
+
 ## Commands (owner DM only)
+
+The panel covers all of these; the commands still work if you prefer typing.
 
 | command | |
 |---|---|
+| `/start` | open the control panel |
 | `/load` | verify and load backup channels |
 | `/status` | pool, active channel, post location |
 | `/refresh` | re-render the post right now |
@@ -164,6 +188,7 @@ bot.py        handlers, watchdog job, owner pings
 core.py       link parsing, admin checks, post rendering + editing
 template.py   clones a post's formatting and swaps only its links
 ui.py         owner notification cards
+menu.py       inline-button control panel
 storage.py    JSON state
 config.py     .env loader
 ```

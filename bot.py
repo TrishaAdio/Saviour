@@ -13,13 +13,17 @@ Flow
 5. Out of links -> it DMs the owner asking for new ones.
 """
 
+import html as _html
 import logging
+import re
+from typing import Optional
 
 from telegram import Update
 from telegram.constants import ChatMemberStatus, ParseMode
 from telegram.error import BadRequest, Forbidden
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     ChatMemberHandler,
     CommandHandler,
     ContextTypes,
@@ -29,6 +33,7 @@ from telegram.ext import (
 
 import config
 import core
+import menu
 import ui
 from storage import store
 
@@ -52,7 +57,7 @@ def is_owner(update: Update) -> bool:
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_owner(update):
         return
-    await update.message.reply_text(ui.help_menu(), parse_mode=ParseMode.HTML)
+    await send_screen(update, menu.home())
 
 
 async def cmd_load(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -65,10 +70,7 @@ async def cmd_load(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_owner(update):
         return
-    await update.message.reply_text(
-        ui.status(store.channels, store.post, config.LINK_MODE == "spread"),
-        parse_mode=ParseMode.HTML, disable_web_page_preview=True,
-    )
+    await send_screen(update, menu.status())
 
 
 async def cmd_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -224,6 +226,129 @@ async def cmd_unset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "to start again."),
         parse_mode=ParseMode.HTML,
     )
+
+
+# -------------------------------------------------------- inline panel
+def _plain(html_text: str) -> str:
+    """Pop-up toasts can't show formatting; strip tags and unescape."""
+    return _html.unescape(re.sub(r"<[^>]+>", "", html_text))[:200]
+
+
+async def send_screen(update: Update, screen) -> None:
+    text, keyboard = screen
+    await update.message.reply_text(
+        text, parse_mode=ParseMode.HTML, reply_markup=keyboard,
+        disable_web_page_preview=True,
+    )
+
+
+async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Every panel button lands here and edits the same message in place."""
+    query = update.callback_query
+    if query is None or not query.data:
+        return
+    if not is_owner(update):
+        await query.answer("This panel is only for the bot owner.", show_alert=True)
+        return
+
+    _, action, *rest = query.data.split(":") + [""]
+    arg = rest[0] if rest else ""
+    toast = None
+    screen = None
+
+    def channel_id() -> Optional[int]:
+        try:
+            return int(arg)
+        except ValueError:
+            return None
+
+    if action == "home":
+        screen = menu.home()
+    elif action == "status":
+        screen = menu.status()
+    elif action == "chs":
+        screen = menu.channels(int(arg) if arg.lstrip("-").isdigit() else 0)
+    elif action in ("ch", "rm"):
+        cid = channel_id()
+        screen = (menu.channel(cid) if action == "ch" else menu.confirm_remove(cid)) \
+            if cid is not None else None
+        if screen is None:
+            toast, screen = "That channel is no longer connected.", menu.channels(0)
+    elif action == "act":
+        cid = channel_id()
+        ch = store.get_channel(cid) if cid is not None else None
+        if ch:
+            store.channels.remove(ch)
+            store.channels.insert(0, ch)
+            await store.save()
+            result = await core.refresh_post(context.bot)
+            toast = f"Now showing {ch['title']}. Post: {_plain(ui.post_status(result))}"
+            screen = menu.channel(cid)
+        else:
+            toast, screen = "That channel is no longer connected.", menu.channels(0)
+    elif action == "rmok":
+        cid = channel_id()
+        ch = store.get_channel(cid) if cid is not None else None
+        if ch:
+            store.remove_channel(cid)
+            await store.save()
+            result = await core.refresh_post(context.bot)
+            toast = f"Removed {ch['title']}. Post: {_plain(ui.post_status(result))}"
+        screen = menu.channels(0)
+    elif action == "post":
+        screen = menu.post()
+    elif action == "refresh":
+        result = await core.refresh_post(context.bot)
+        toast = _plain(ui.post_status(result))
+        screen = menu.post()
+    elif action == "lines":
+        post = store.post
+        if post and not post.get("template") and arg.isdigit():
+            post["slots"] = max(1, min(20, int(arg)))
+            await store.save()
+            result = await core.refresh_post(context.bot)
+            toast = f"{post['slots']} lines. Post: {_plain(ui.post_status(result))}"
+        screen = menu.post()
+    elif action == "unset":
+        screen = menu.confirm_unset() if store.post else menu.post()
+    elif action == "unsetok":
+        store.clear_post()
+        await store.save()
+        toast, screen = "Monitoring stopped.", menu.post()
+    elif action == "add":
+        context.user_data["awaiting_load"] = True
+        screen = menu.add()
+    elif action == "help":
+        screen = menu.help_screen()
+    elif action == "close":
+        await query.answer()
+        try:
+            await query.edit_message_text(menu.closed(), parse_mode=ParseMode.HTML)
+        except BadRequest:
+            pass
+        return
+    else:
+        screen = menu.home()
+
+    try:
+        await query.answer(toast)
+    except (BadRequest, core.TRANSIENT) as exc:  # answering late is harmless
+        log.info("callback answer skipped: %s", exc)
+
+    text, keyboard = screen
+    try:
+        await core.with_retry(
+            query.edit_message_text, text, parse_mode=ParseMode.HTML,
+            reply_markup=keyboard, disable_web_page_preview=True, what="panel edit",
+        )
+    except BadRequest as exc:
+        if "not modified" not in (exc.message or "").lower():
+            log.warning("panel edit failed: %s", exc)
+    except core.TRANSIENT as exc:
+        log.warning("panel edit timed out: %s", exc)
+
+    if action == "rmok":
+        await beg_if_empty(context)
 
 
 # ------------------------------------------------------ link ingestion
@@ -562,6 +687,7 @@ def main() -> None:
     app.add_handler(CommandHandler("preview", cmd_preview, private))
     app.add_handler(CommandHandler("unset", cmd_unset, private))
 
+    app.add_handler(CallbackQueryHandler(on_menu, pattern=r"^m:"))
     app.add_handler(
         ChatMemberHandler(on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER)
     )
