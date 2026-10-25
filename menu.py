@@ -19,6 +19,7 @@ Callback data (all under 64 bytes, Telegram's limit):
     m:unsetok              stop monitoring
     m:add                  add channels (instructions)
     m:help                 how it works
+    m:sync                 find channels the bot is admin in
     m:close                remove the panel
 """
 
@@ -89,8 +90,9 @@ def home() -> Screen:
          B(f"Channels · {pool}", "channel", "m:chs:0")],
         [B("Redirect post", "post", "m:post"),
          B("Add channels", "add", "m:add", "success")],
-        [B("How it works", "book", "m:help"),
-         B("Close", "close", "m:close")],
+        [B("Sync channels", "scan", "m:sync", "primary"),
+         B("How it works", "book", "m:help")],
+        [B("Close", "close", "m:close")],
     ])
 
 
@@ -274,12 +276,24 @@ def help_screen() -> Screen:
         "<code>/login</code>  Connect a user account (reliable link checks)\n"
         "<code>/logout</code>  Disconnect it\n"
         "<code>/scan</code>  Check every channel now\n"
+        "<code>/sync</code>  Find channels the bot is admin in\n"
         "<code>/load</code>  Add channels by link or id\n"
         "<code>/preview</code>  Sample notifications\n"
         "<code>/icons</code>  Turn Premium icons on or off\n"
         "<code>/cancel</code>  Stop what's in progress"
     )
     return text, _kb([_back()])
+
+
+def sync_running() -> Screen:
+    import userbot
+    return ui.sync_running(userbot.logged_in()), _kb([_back()])
+
+
+def sync_done(report: dict) -> Screen:
+    rows = [[B("Channels", "channel", "m:chs:0"), B("Sync again", "scan", "m:sync")],
+            _back()]
+    return ui.sync_report(report), _kb(rows)
 
 
 def closed() -> str:

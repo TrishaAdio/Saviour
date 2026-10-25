@@ -48,6 +48,7 @@ ROW_ICONS = {
     "Mode": "gear", "Current": "gear", "Default": "gear",
     "Strike": "warn", "Warning": "warn", "Risk": "warn", "Effect": "warn",
     "Missing": "warn", "Error": "crit",
+    "Found": "scan", "Checked": "scan", "Connected": "good", "Already known": "pool", "Via": "user",
 }
 
 _session_drops = 0       # consecutive messages Telegram stripped icons from

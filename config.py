@@ -56,6 +56,11 @@ DEATH_STRIKES = max(_int("DEATH_STRIKES", 3), 1)
 # account well inside Telegram's limits.
 MIN_REQUEST_GAP = max(_int("MIN_REQUEST_GAP", 3), 1)
 
+# Seconds between automatic searches for channels the bot is admin in but does
+# not know about yet (needs /login). 0 turns the automatic search off; /sync
+# always works.
+SYNC_INTERVAL = _int("SYNC_INTERVAL", 21600)
+
 # Premium icons (tgmacicons pack) in messages and on buttons. They need the bot
 # owner to have Telegram Premium; if Telegram doesn't show them the bot turns
 # them off by itself. /icons on|off changes this at runtime.
