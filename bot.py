@@ -125,6 +125,9 @@ async def handle_login_step(update: Update, context: ContextTypes.DEFAULT_TYPE,
         context.user_data.pop("login", None)
         await message.reply_text(ui.login_done(info), parse_mode=ParseMode.HTML)
         log.info("userbot signed in as %s", info)
+        # Now that checks are trustworthy, take a baseline of every channel.
+        if store.channels:
+            await run_scan(context, message)
         return
     if step == "failed":
         context.user_data.pop("login", None)
@@ -169,7 +172,7 @@ async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await update.message.reply_text(
         ui.done("Channel removed", [
             ("Channel", f"<b>{ui.esc(channel['title'])}</b>"),
-            ("Pool", ui.pool_value(len(store.channels))),
+            ("Pool", ui.pool_value(len(store.online()))),
             ("Post", ui.post_status(result)),
         ]),
         parse_mode=ParseMode.HTML,
@@ -222,6 +225,57 @@ async def cmd_active(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         ]),
         parse_mode=ParseMode.HTML, disable_web_page_preview=True,
     )
+
+
+async def run_scan(context: ContextTypes.DEFAULT_TYPE, message) -> None:
+    """Check every channel once and report. Nothing is parked from one scan."""
+    channels = list(store.channels)
+    note = await message.reply_text(
+        f"{ui.INFO} <b>Scanning {ui.plural(len(channels), 'channel')}…</b>",
+        parse_mode=ParseMode.HTML)
+
+    results = []
+    for channel in channels:
+        state, reason = await core.check_channel(context.bot, channel)
+        results.append((channel, state, reason))
+        if state in ("ok", "relinked"):
+            channel["strikes"] = 0
+            if channel.get("offline"):
+                store.bring_online(channel["id"])
+        elif state == "suspect":
+            # A scan only records the first strike; parking still needs
+            # DEATH_STRIKES failures across separate rounds.
+            channel["strikes"] = max(int(channel.get("strikes", 0)), 1)
+            channel["reason"] = reason
+
+    store.data["last_check"] = int(time.time())
+    await store.save()
+    result = await core.refresh_post(context.bot) if store.post else "no-post"
+    log.info("scan: %s", ", ".join(f"{c['title']}={s}" for c, s, _ in results))
+
+    try:
+        await note.edit_text(ui.scan_report(results, result), parse_mode=ParseMode.HTML,
+                             disable_web_page_preview=True)
+    except BadRequest:
+        await message.reply_text(ui.scan_report(results, result),
+                                 parse_mode=ParseMode.HTML,
+                                 disable_web_page_preview=True)
+    await beg_if_empty(context)
+
+
+async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Check every channel right now."""
+    if not is_owner(update):
+        return
+    if not store.channels:
+        await update.message.reply_text(
+            ui.problem("Nothing to scan", "No channels are connected yet."),
+            parse_mode=ParseMode.HTML)
+        return
+    if config.REQUIRE_USERBOT and not userbot.logged_in():
+        await update.message.reply_text(ui.monitoring_paused(), parse_mode=ParseMode.HTML)
+        return
+    await run_scan(context, update.message)
 
 
 async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -363,11 +417,15 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         cid = channel_id()
         ch = store.get_channel(cid) if cid is not None else None
         if ch:
+            revived = bool(ch.get("offline"))
+            if revived:
+                store.bring_online(cid)        # owner overrules the check
             store.channels.remove(ch)
             store.channels.insert(0, ch)
             await store.save()
             result = await core.refresh_post(context.bot)
-            toast = f"Now showing {ch['title']}. Post: {_plain(ui.post_status(result))}"
+            lead = "Back in use" if revived else "Now showing"
+            toast = f"{lead}: {ch['title']}. Post: {_plain(ui.post_status(result))}"
             screen = menu.channel(cid)
         else:
             toast, screen = "That channel is no longer connected.", menu.channels(0)
@@ -636,7 +694,7 @@ async def on_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         context,
         ui.channel_connected(
             title, chat.id, result["link"], result["new"], report,
-            len(store.channels), post_result, rescued=was_out_of_links,
+            len(store.online()), post_result, rescued=was_out_of_links,
         ),
     )
 
@@ -659,7 +717,7 @@ async def notify_owner(context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
 
 async def beg_if_empty(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Ask the owner for links once the pool runs dry (only once per drought)."""
-    if len(store.channels) >= max(config.MIN_CHANNELS, 1):
+    if len(store.online()) >= max(config.MIN_CHANNELS, 1):
         return
     if store.awaiting_links:
         return
@@ -674,36 +732,78 @@ async def health_check(context: ContextTypes.DEFAULT_TYPE) -> None:
         await beg_if_empty(context)
         return
 
-    dead, relinked, unknown = [], [], 0
+    # Without a user account the only available check is reading t.me, which
+    # reports live channels as missing. Judging channels on that is what
+    # emptied the pool, so monitoring stays paused until /login.
+    if config.REQUIRE_USERBOT and not userbot.logged_in():
+        if store.post:
+            await core.refresh_post(context.bot)
+        if not store.data.get("paused_notified"):
+            store.data["paused_notified"] = True
+            await store.save()
+            await notify_owner(context, ui.monitoring_paused())
+        log.warning("monitoring paused: no user account connected (/login)")
+        return
+    store.data["paused_notified"] = False
+
+    parked, relinked, recovered, suspects, unknown = [], [], [], [], 0
+
     for channel in list(store.channels):
         state, reason = await core.check_channel(context.bot, channel)
-        if state == "dead":
-            dead.append({**channel, "reason": reason})
-        elif state == "relinked":
-            relinked.append(channel)
-        elif state == "unknown":
-            unknown += 1
+        was_offline = bool(channel.get("offline"))
 
-    for channel in dead:
-        store.remove_channel(channel["id"])
+        if state in ("ok", "relinked"):
+            channel["strikes"] = 0
+            if was_offline:
+                store.bring_online(channel["id"])
+                recovered.append(channel)
+            if state == "relinked":
+                relinked.append(channel)
+            continue
+
+        if state == "unknown":
+            unknown += 1
+            log.info("channel %s unverified this round: %s", channel["id"], reason)
+            continue
+
+        # suspect: count a strike. Only after DEATH_STRIKES rounds in a row,
+        # each CHECK_INTERVAL apart, is it parked offline.
+        channel["strikes"] = int(channel.get("strikes", 0)) + 1
+        channel["reason"] = reason
+        log.warning("channel %s suspect (%s/%s): %s", channel["id"],
+                    channel["strikes"], config.DEATH_STRIKES, reason)
+        if was_offline:
+            continue
+        if channel["strikes"] >= config.DEATH_STRIKES:
+            store.park_offline(channel["id"], reason)
+            parked.append(channel)
+        else:
+            suspects.append(channel)
+
     store.data["last_check"] = int(time.time())
     await store.save()
 
     # Re-render every round: fixes the post whenever its links don't match the
-    # pool, and confirms the post still exists. Unchanged = one no-op call.
+    # working channels, and confirms the post still exists.
     result = await core.refresh_post(context.bot) if store.post else "no-post"
 
-    log.info("health check: %s ok, %s dead, %s relinked, %s unverified | post -> %s",
-             len(store.channels) - len(relinked) - unknown, len(dead), len(relinked),
-             unknown, result)
+    log.info("health check: %s working, %s offline | parked %s, relinked %s, "
+             "recovered %s, unverified %s | post -> %s",
+             len(store.online()), len(store.offline()), len(parked), len(relinked),
+             len(recovered), unknown, result)
 
-    if dead:
-        await notify_owner(context, ui.channels_offline(dead, len(store.channels), result))
+    if parked:
+        await notify_owner(context, ui.channels_offline(parked, len(store.online()), result))
+    for channel in recovered:
+        await notify_owner(context, ui.channel_recovered(channel, result))
     for channel in relinked:
         await notify_owner(context, ui.channel_relinked(channel, result))
+    for channel in suspects:
+        if channel["strikes"] == 1:  # tell the owner early, but only once
+            await notify_owner(context, ui.channel_suspect(channel))
     if result == "post-gone":
         await notify_owner(context, ui.post_deleted())
-    elif result.startswith("error") and (dead or relinked):
+    elif result.startswith("error") and (parked or relinked or recovered):
         await notify_owner(context, ui.post_update_failed(result))
 
     await beg_if_empty(context)
@@ -787,6 +887,7 @@ def main() -> None:
     app.add_handler(CommandHandler("login", cmd_login, private))
     app.add_handler(CommandHandler("logout", cmd_logout, private))
     app.add_handler(CommandHandler("cancel", cmd_cancel, private))
+    app.add_handler(CommandHandler("scan", cmd_scan, private))
     app.add_handler(CommandHandler("status", cmd_status, private))
     app.add_handler(CommandHandler("refresh", cmd_refresh, private))
     app.add_handler(CommandHandler("remove", cmd_remove, private))

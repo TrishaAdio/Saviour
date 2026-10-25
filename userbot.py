@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -44,6 +45,30 @@ LIVE, DEAD, UNKNOWN = True, False, None
 _client: Optional["TelegramClient"] = None
 _lock = asyncio.Lock()
 _broken = False  # session rejected by Telegram; stop trying until re-login
+
+# ---- keeping the account safe -----------------------------------------
+# Only two read-only requests are ever made (checkChatInvite,
+# resolveUsername). We never join, leave, message or search. On top of that
+# the account is protected by a minimum gap between requests and by fully
+# respecting any flood-wait Telegram hands out.
+_request_lock = asyncio.Lock()
+_last_request = 0.0
+_flood_until = 0.0
+
+
+def cooling_down() -> int:
+    """Seconds left of a flood-wait, 0 when clear to send."""
+    return max(0, int(_flood_until - time.monotonic()))
+
+
+async def _pace() -> None:
+    """Keep at least MIN_REQUEST_GAP seconds between userbot requests."""
+    global _last_request
+    gap = config.MIN_REQUEST_GAP
+    waited = time.monotonic() - _last_request
+    if waited < gap:
+        await asyncio.sleep(gap - waited)
+    _last_request = time.monotonic()
 
 
 # ------------------------------------------------------------- storage
@@ -167,17 +192,24 @@ def _dead_detail(exc: Exception) -> str:
 
 
 def _chat_is_gone(chat: Any) -> bool:
-    """A banned/deleted channel can still come back as a stub object."""
+    """Only true for a channel Telegram itself reports as banned or deleted.
+
+    Deliberately narrow. ``left``, ``restricted`` or ``kicked`` all describe
+    *our* relationship with a perfectly alive channel, so they must never
+    count as dead.
+    """
     if chat is None:
         return True
     if isinstance(chat, types.ChannelForbidden):
         return True
-    return bool(getattr(chat, "deactivated", False)
-                or getattr(chat, "left", False) and getattr(chat, "broadcast", False) is None)
+    return bool(getattr(chat, "deactivated", False))
 
 
 async def check_link(url: str) -> Tuple[Optional[bool], str]:
     """Ask Telegram whether a link works. Returns (LIVE/DEAD/UNKNOWN, detail)."""
+    left = cooling_down()
+    if left:
+        return UNKNOWN, f"waiting out a Telegram rate limit ({left}s left)"
     client = await connected()
     if client is None:
         return UNKNOWN, "userbot unavailable"
@@ -185,30 +217,14 @@ async def check_link(url: str) -> Tuple[Optional[bool], str]:
     invite = _INVITE_RE.search(url)
     public = _PUBLIC_RE.search(url.rstrip("/"))
     try:
-        if invite:
-            result = await client(functions.messages.CheckChatInviteRequest(invite.group(1)))
-            if isinstance(result, types.ChatInviteAlready):
-                return (DEAD, "Channel is banned or deleted") if _chat_is_gone(result.chat) \
-                    else (LIVE, "Already a member")
-            if isinstance(result, types.ChatInvitePeek):
-                return (DEAD, "Channel is banned or deleted") if _chat_is_gone(result.chat) \
-                    else (LIVE, "Invite works")
-            if isinstance(result, types.ChatInvite):
-                return LIVE, f"Invite works ({result.title})"
-            return UNKNOWN, f"Unexpected reply: {type(result).__name__}"
-
-        if public:
-            result = await client(functions.contacts.ResolveUsernameRequest(public.group(1)))
-            chats = list(getattr(result, "chats", []) or [])
-            if not chats:
-                return DEAD, "Channel username no longer exists"
-            return (DEAD, "Channel is banned or deleted") if _chat_is_gone(chats[0]) \
-                else (LIVE, "Channel is reachable")
-
-        return UNKNOWN, "not a t.me channel link"
-
+        async with _request_lock:
+            await _pace()
+            return await _ask(client, url, invite, public)
     except errors.FloodWaitError as exc:
-        log.warning("userbot flood wait %ss on %s", exc.seconds, url)
+        global _flood_until
+        _flood_until = time.monotonic() + exc.seconds + 5
+        log.warning("userbot flood wait %ss - pausing all checks until it clears",
+                    exc.seconds)
         return UNKNOWN, f"rate limited for {exc.seconds}s"
     except (errors.InviteHashExpiredError, errors.InviteHashInvalidError,
             errors.InviteHashEmptyError, errors.ChannelPrivateError,
@@ -224,6 +240,31 @@ async def check_link(url: str) -> Tuple[Optional[bool], str]:
     except Exception as exc:  # noqa: BLE001 - never let a check crash the job
         log.warning("userbot check of %s failed: %s: %s", url, type(exc).__name__, exc)
         return UNKNOWN, f"{type(exc).__name__}"
+
+
+async def _ask(client, url: str, invite, public) -> Tuple[Optional[bool], str]:
+    """The actual request. Every error is handled by ``check_link``."""
+    if invite:
+        result = await client(functions.messages.CheckChatInviteRequest(invite.group(1)))
+        if isinstance(result, types.ChatInviteAlready):
+            return (DEAD, "Channel is banned or deleted") if _chat_is_gone(result.chat) \
+                else (LIVE, "Already a member")
+        if isinstance(result, types.ChatInvitePeek):
+            return (DEAD, "Channel is banned or deleted") if _chat_is_gone(result.chat) \
+                else (LIVE, "Invite works")
+        if isinstance(result, types.ChatInvite):
+            return LIVE, f"Invite works ({result.title})"
+        return UNKNOWN, f"Unexpected reply: {type(result).__name__}"
+
+    if public:
+        result = await client(functions.contacts.ResolveUsernameRequest(public.group(1)))
+        chats = list(getattr(result, "chats", []) or [])
+        if not chats:
+            return DEAD, "Channel username no longer exists"
+        return (DEAD, "Channel is banned or deleted") if _chat_is_gone(chats[0]) \
+            else (LIVE, "Channel is reachable")
+
+    return UNKNOWN, "not a t.me channel link"
 
 
 # ------------------------------------------------------- login journey

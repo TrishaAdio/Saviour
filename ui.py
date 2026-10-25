@@ -147,16 +147,24 @@ def channel_disconnected(channel: dict, reason: str, pool: int, post_result: str
 
 
 def channels_offline(dead: List[dict], pool: int, post_result: str) -> str:
-    tail = [("Pool", pool_value(pool)), ("Post", post_status(post_result))]
+    import config
+    tail = [("Working", pool_value(pool)), ("Post", post_status(post_result))]
+    note = "Kept and re-checked every round — if it comes back it returns to the " \
+           "post by itself." if len(dead) == 1 else \
+           "All kept and re-checked; they return by themselves if they come back."
+    advice = _pool_advice(pool)
+    if advice:
+        note = f"{advice} {note}"
     if len(dead) == 1:
         rows = [("Channel", f"<b>{esc(dead[0]['title'])}</b>"),
                 ("ID", code(dead[0]["id"]))]
         if dead[0].get("reason"):
             rows.append(("Reason", esc(dead[0]["reason"])))
-        return card(CRIT, "Channel offline", rows + tail, _pool_advice(pool))
+        rows.append(("Confirmed", f"failed {config.DEATH_STRIKES} checks in a row"))
+        return card(CRIT, "Channel taken out of the post", rows + tail, note)
     items = [f"• <b>{esc(c['title'])}</b>  {code(c['id'])}"
              + (f"\n   {esc(c['reason'])}" if c.get("reason") else "") for c in dead]
-    return card(CRIT, f"{len(dead)} channels offline", tail, _pool_advice(pool), items)
+    return card(CRIT, f"{len(dead)} channels taken out of the post", tail, note, items)
 
 
 def channel_relinked(channel: dict, post_result: str) -> str:
@@ -312,12 +320,18 @@ def ago(ts: Optional[int]) -> str:
 
 def status(channels: List[dict], post: Optional[dict], spread: bool,
            last_check: Optional[int] = None) -> str:
+    working = [c for c in channels if not c.get("offline")]
+    parked = [c for c in channels if c.get("offline")]
     items = []
-    for i, ch in enumerate(channels):
+    for i, ch in enumerate(working):
         star = "  ⭐" if i == 0 and not spread else ""
         items.append(f"• <b>{esc(ch['title'])}</b>{star}\n   {code(ch['id'])} · {link(ch['link'])}")
     if not items:
-        items.append("<i>No channels connected</i>")
+        items.append("<i>No working channels</i>")
+    for ch in parked:
+        items.append(f"⚠️ <b>{esc(ch['title'])}</b> · offline\n"
+                     f"   {code(ch['id'])} · {esc(ch.get('reason', 'unknown'))}")
+    channels = working
     if post:
         fmt = "original kept" if post.get("template") else "default"
         post_txt = (f"{code(post['chat_id'])} · msg {code(post['message_id'])}\n"
@@ -392,3 +406,60 @@ def login_done(name: str) -> str:
 
 def login_failed(reason: str) -> str:
     return card(WARN, "Login failed", (), f"{reason}\n\nSend <code>/login</code> to try again.")
+
+
+# --------------------------------------------- monitoring / scanning
+def monitoring_paused() -> str:
+    return card(CRIT, "Monitoring paused", [
+        ("Reason", "No user account connected"),
+        ("Risk", "A dead link would stay in your post"),
+    ], "A bot account can't tell a live channel from a dead one — guessing from "
+       "the t.me page is what dropped working channels before. Send "
+       "<code>/login</code> and monitoring starts immediately.")
+
+
+def channel_suspect(channel: dict) -> str:
+    import config
+    return card(WARN, "Channel not responding", [
+        ("Channel", f"<b>{esc(channel['title'])}</b>"),
+        ("ID", code(channel["id"])),
+        ("Reason", esc(channel.get("reason", "unknown"))),
+        ("Strike", f"{channel.get('strikes', 1)} of {config.DEATH_STRIKES}"),
+    ], "Still in use for now. I'll only take it out of the post after "
+       f"{config.DEATH_STRIKES} failed checks in a row.")
+
+
+def channel_recovered(channel: dict, post_result: str) -> str:
+    return card(OK, "Channel is back", [
+        ("Channel", f"<b>{esc(channel['title'])}</b>"),
+        ("ID", code(channel["id"])),
+        ("Invite", link(channel["link"])),
+        ("Post", post_status(post_result)),
+    ], "It answered again, so it's back in use. Nothing was lost.")
+
+
+def scan_report(results: List[Tuple[dict, str, str]], post_result: str) -> str:
+    """results: (channel, state, reason) for every channel, after a full scan."""
+    label = {"ok": "✓", "relinked": "↻", "suspect": "✕", "unknown": "?"}
+    items = []
+    for channel, state, reason in results:
+        line = f"{label.get(state, '?')} <b>{esc(channel['title'])}</b>"
+        if state == "relinked":
+            line += " · new invite link created"
+        elif state == "suspect":
+            line += f" · {esc(reason)}"
+        elif state == "unknown":
+            line += f" · couldn't verify ({esc(reason)})"
+        items.append(line)
+    working = sum(1 for _, s, _ in results if s in ("ok", "relinked"))
+    bad = sum(1 for _, s, _ in results if s == "suspect")
+    rows = [("Working", f"{working} of {len(results)}")]
+    if bad:
+        rows.append(("Not reachable", str(bad)))
+    if post_result != "no-post":
+        rows.append(("Post", post_status(post_result)))
+    note = None
+    if bad:
+        note = ("Channels marked ✕ are kept and re-checked; they're only taken "
+                "out of the post after repeated failures.")
+    return card(OK if working else WARN, "Scan complete", rows, note, items)

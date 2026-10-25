@@ -74,6 +74,45 @@ From then on every check calls `messages.checkChatInvite` /
 channel is detected for certain**. `/start` shows `Verify: User account @you`
 when it's active. `/logout` disconnects it.
 
+Right after login the bot **scans every channel once** and reports which links
+work. `/scan` repeats that at any time.
+
+**Until an account is connected, monitoring stays paused** (`REQUIRE_USERBOT`).
+Guessing from the t.me page is what previously dropped working channels, so the
+bot refuses to judge rather than risk it.
+
+### Your account won't get banned
+Only two read-only requests are ever made: *check invite* and *resolve
+username*. The bot never joins, leaves, messages, searches or scrapes. On top of
+that:
+
+- at least `MIN_REQUEST_GAP` seconds (default 3) between any two requests
+- requests are made one at a time, never in parallel
+- a flood-wait from Telegram pauses **all** checks until it fully expires, and
+  nothing is judged during the pause
+- the session is reused, so the account doesn't repeatedly re-authenticate
+
+## Why a working channel is never dropped
+
+The old version sometimes decided a live channel was dead and burned through the
+pool. Three rules now prevent that:
+
+1. **Only Telegram may say "dead".** A negative result from reading t.me counts
+   as *unknown*, never as dead.
+2. **One bad answer is not enough.** A channel must fail `DEATH_STRIKES`
+   checks in a row (default 3, one per `CHECK_INTERVAL`) before it leaves the
+   post. Any single success resets the count. You get a 🟠 warning on the first
+   failure, long before anything changes.
+3. **Nothing is ever deleted.** A confirmed-dead channel is *parked offline*:
+   kept in the file, kept out of the post, and re-checked every round. If it
+   answers again it returns on its own, and you get a 🟢 *Channel is back* DM.
+
+A revoked invite link is not treated as a dead channel either — the bot creates
+a fresh link, verifies it, and keeps the channel.
+
+You can always overrule a verdict: open the channel in `/start` → **Channels**
+and press **✅ Use it anyway**.
+
 > **Security.** The session grants full access to that account — use a spare one
 > if you can. The bot deletes the api_hash, code and password messages as they
 > arrive, and stores the session in `session.json` with owner-only permissions
@@ -177,6 +216,7 @@ The panel covers all of these; the commands still work if you prefer typing.
 | `/start` | open the control panel |
 | `/login` | connect a user account for reliable link checks |
 | `/logout` | disconnect the user account |
+| `/scan` | check every channel right now |
 | `/cancel` | stop whatever is in progress |
 | `/load` | verify and load backup channels |
 | `/status` | pool, active channel, post location |
@@ -222,6 +262,9 @@ Paste a new channel link in the chat and the post is fixed immediately. Run
 | `CHECK_INTERVAL` | `300` | seconds between health checks |
 | `HTTP_TIMEOUT` | `20` | seconds to wait for Telegram before a request counts as timed out |
 | `API_ID` / `API_HASH` | — | optional, from my.telegram.org; lets `/login` skip straight to the phone number |
+| `REQUIRE_USERBOT` | `true` | pause monitoring until a user account is connected |
+| `DEATH_STRIKES` | `3` | failed checks in a row before a channel leaves the post |
+| `MIN_REQUEST_GAP` | `3` | minimum seconds between user-account requests |
 | `LINK_MODE` | `single` | `single` = every line shows the active channel, rest held in reserve · `spread` = rotate lines across the whole pool |
 | `AUTO_ADD` | `true` | auto-pool any channel the bot is promoted in |
 | `REPOST_IF_DELETED` | `false` | if the post is deleted: send a new one (`true`) or ask you to `.set` again (`false`) |
