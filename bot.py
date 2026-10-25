@@ -16,6 +16,7 @@ Flow
 import html as _html
 import logging
 import re
+import time
 from typing import Optional
 
 from telegram import Update
@@ -582,29 +583,37 @@ async def health_check(context: ContextTypes.DEFAULT_TYPE) -> None:
         await beg_if_empty(context)
         return
 
-    dead = []
+    dead, relinked, unknown = [], [], 0
     for channel in list(store.channels):
-        if not await core.is_channel_alive(context.bot, channel):
-            dead.append(channel)
+        state, reason = await core.check_channel(context.bot, channel)
+        if state == "dead":
+            dead.append({**channel, "reason": reason})
+        elif state == "relinked":
+            relinked.append(channel)
+        elif state == "unknown":
+            unknown += 1
+
+    for channel in dead:
+        store.remove_channel(channel["id"])
+    store.data["last_check"] = int(time.time())
+    await store.save()
+
+    # Re-render every round: fixes the post whenever its links don't match the
+    # pool, and confirms the post still exists. Unchanged = one no-op call.
+    result = await core.refresh_post(context.bot) if store.post else "no-post"
+
+    log.info("health check: %s ok, %s dead, %s relinked, %s unverified | post -> %s",
+             len(store.channels) - len(relinked) - unknown, len(dead), len(relinked),
+             unknown, result)
 
     if dead:
-        for channel in dead:
-            store.remove_channel(channel["id"])
-        await store.save()
-
-        result = await core.refresh_post(context.bot)
         await notify_owner(context, ui.channels_offline(dead, len(store.channels), result))
-        log.info(
-            "dead: %s | post -> %s | pool left %s",
-            ", ".join(str(c["id"]) for c in dead),
-            result,
-            len(store.channels),
-        )
-    elif store.post:
-        # Nothing died, but confirm the post still exists. Re-rendering an
-        # unchanged post is a no-op ("not modified"), so this stays cheap.
-        if await core.refresh_post(context.bot) == "post-gone":
-            await notify_owner(context, ui.post_deleted())
+    for channel in relinked:
+        await notify_owner(context, ui.channel_relinked(channel, result))
+    if result == "post-gone":
+        await notify_owner(context, ui.post_deleted())
+    elif result.startswith("error") and (dead or relinked):
+        await notify_owner(context, ui.post_update_failed(result))
 
     await beg_if_empty(context)
 

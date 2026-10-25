@@ -13,6 +13,7 @@ Severity: 🟢 done · 🔵 info · 🟠 needs attention · 🔴 critical.
 """
 
 import html
+import time
 from typing import Iterable, List, Optional, Sequence, Tuple
 
 import config
@@ -149,10 +150,28 @@ def channels_offline(dead: List[dict], pool: int, post_result: str) -> str:
     tail = [("Pool", pool_value(pool)), ("Post", post_status(post_result))]
     if len(dead) == 1:
         rows = [("Channel", f"<b>{esc(dead[0]['title'])}</b>"),
-                ("ID", code(dead[0]["id"]))] + tail
-        return card(CRIT, "Channel offline", rows, _pool_advice(pool))
-    items = [f"• <b>{esc(c['title'])}</b>  {code(c['id'])}" for c in dead]
+                ("ID", code(dead[0]["id"]))]
+        if dead[0].get("reason"):
+            rows.append(("Reason", esc(dead[0]["reason"])))
+        return card(CRIT, "Channel offline", rows + tail, _pool_advice(pool))
+    items = [f"• <b>{esc(c['title'])}</b>  {code(c['id'])}"
+             + (f"\n   {esc(c['reason'])}" if c.get("reason") else "") for c in dead]
     return card(CRIT, f"{len(dead)} channels offline", tail, _pool_advice(pool), items)
+
+
+def channel_relinked(channel: dict, post_result: str) -> str:
+    return card(WARN, "Invite link replaced", [
+        ("Channel", f"<b>{esc(channel['title'])}</b>"),
+        ("ID", code(channel["id"])),
+        ("New link", link(channel["link"])),
+        ("Post", post_status(post_result)),
+    ], "The old invite link stopped working, so I created a new one.")
+
+
+def post_update_failed(result: str) -> str:
+    return card(CRIT, "Post could not be updated", [("Error", post_status(result))],
+                "The post may still show a dead link. Check my <i>Edit Messages</i> "
+                "right in the channel, then press Refresh in /start.")
 
 
 def _pool_advice(pool: int) -> Optional[str]:
@@ -280,7 +299,19 @@ def load_result(added, refreshed, failed, unresolvable, pool, post_line: Optiona
     return card(OK if ok else WARN, title, rows, note, items)
 
 
-def status(channels: List[dict], post: Optional[dict], spread: bool) -> str:
+def ago(ts: Optional[int]) -> str:
+    if not ts:
+        return "never"
+    secs = max(int(time.time()) - int(ts), 0)
+    if secs < 90:
+        return "just now"
+    if secs < 5400:
+        return f"{secs // 60} min ago"
+    return f"{secs // 3600} h {secs % 3600 // 60} min ago"
+
+
+def status(channels: List[dict], post: Optional[dict], spread: bool,
+           last_check: Optional[int] = None) -> str:
     items = []
     for i, ch in enumerate(channels):
         star = "  ⭐" if i == 0 and not spread else ""
@@ -300,6 +331,7 @@ def status(channels: List[dict], post: Optional[dict], spread: bool) -> str:
         "<blockquote>" + "\n".join(items) + "</blockquote>\n"
         "<b>Redirect post</b>\n"
         f"<blockquote>{post_txt}</blockquote>\n"
+        f"<b>Last check</b>  {ago(last_check)}\n"
         f"<i>Mode {'spread' if spread else 'single'} · checks every "
         f"{plural(minutes, 'minute')}</i>"
     )

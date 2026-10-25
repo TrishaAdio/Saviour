@@ -1,0 +1,23 @@
+# Keeps the bot running: restarts it if it crashes and starts it on boot.
+#
+#   cp saviour.service /etc/systemd/system/
+#   systemctl daemon-reload
+#   systemctl enable --now saviour
+#
+# Logs:   journalctl -u saviour -f      (bot.log is still written as well)
+# Status: systemctl status saviour
+#
+# Edit the two paths below if the bot isn't in /root/Saviour with a venv.
+[Unit]
+Description=Saviour redirect bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/root/Saviour
+ExecStart=/root/Saviour/venv/bin/python3 /root/Saviour/bot.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

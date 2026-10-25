@@ -56,6 +56,22 @@ Set `AUTO_ADD=false` in `.env` to require `/load` instead.
 > admin in, use `/load` once — Telegram sends no event for memberships that
 > predate the bot starting up, and the Bot API has no way to list them.
 
+## Keep it running (important)
+
+If the bot isn't running, nothing gets swapped. Running `python3 bot.py` in an
+SSH session stops the bot when the session closes. Use systemd instead; it
+restarts the bot on crashes and after reboots:
+
+```bash
+cp saviour.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now saviour
+systemctl status saviour        # should say "active (running)"
+```
+
+`/start` shows **Last check** — if that's more than a few minutes old, the bot
+isn't running.
+
 ## Usage
 
 1. **Add the bot as admin** to each backup channel — it needs *Invite Users via Link*.
@@ -90,8 +106,10 @@ Set `AUTO_ADD=false` in `.env` to require `/load` instead.
 
    The line count comes from `POST_SLOTS` in `.env` (default **5**). Override it
    per post with `.set 3`, or change it live with `/slots 5`.
-4. From then on it checks every linked channel on a timer. A dead one is dropped
-   and the post is **edited** to show the next backup's link.
+4. From then on it checks every linked channel on a timer, **including opening
+   each invite link the way a user would**. A channel that's deleted, banned by
+   Telegram, or whose link stopped working is dropped (or gets a fresh link if
+   the bot can still make one), and the post is **edited** to show a live link.
 5. Pool empty → you get an *Action required · no live links* DM. Reply with new
    links in the same chat; it verifies them and updates the post immediately,
    no `/load` needed.
