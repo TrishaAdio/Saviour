@@ -172,6 +172,99 @@ async def register_channel(bot: Bot, chat: Any, title: str) -> Dict[str, Any]:
     return {"ok": True, "new": is_new, "link": link}
 
 
+async def connect_discovered(bot: Bot, found: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Connect channels found by the search, after the bot's own checks.
+
+    Each one must pass what a manual promotion would: the bot is an admin,
+    holds *Invite Users via Link*, and a working invite link can be made.
+    Returns lists of titles (and reasons) so the owner sees what happened.
+    """
+    result: Dict[str, Any] = {"added": [], "existing": [], "host": [],
+                              "need_permission": [], "failed": [], "stale": 0}
+    host = store.post["chat_id"] if store.post else None
+
+    def fail(item, title, reason):
+        # A chat remembered from long ago that no longer works (the bot was
+        # removed, the channel deleted) is not news - drop it quietly.
+        if item.get("seen"):
+            result["stale"] += 1
+        else:
+            result["failed"].append((title, reason))
+
+    for item in found:
+        cid, title = item["id"], item.get("title") or str(item["id"])
+        if cid == host:
+            result["host"].append(title)       # displays the post; never a target
+            continue
+        if store.get_channel(cid):
+            result["existing"].append(title)
+            continue
+        try:
+            member = await with_retry(bot.get_chat_member, cid, bot.id,
+                                      what=f"member {cid}")
+            chat = await with_retry(bot.get_chat, cid, what=f"get_chat {cid}")
+        except (BadRequest, Forbidden) as exc:
+            fail(item, title, f"Telegram: {getattr(exc, 'message', exc)}")
+            continue
+        except TRANSIENT:
+            result["failed"].append((title, "Telegram did not respond, try again"))
+            continue
+        if member.status != ChatMemberStatus.ADMINISTRATOR:
+            fail(item, title, "The bot is no longer admin there")
+            continue
+        if not rights_report(member)["can_link"]:
+            result["need_permission"].append(title)
+            continue
+        done = await register_channel(bot, chat, chat.title or title)
+        if done["ok"]:
+            result["added"].append(chat.title or title)
+        else:
+            result["failed"].append((title, done["reason"]))
+        await asyncio.sleep(0.3)               # gentle on the Bot API
+    return result
+
+
+async def sync_channels(bot: Bot) -> Dict[str, Any]:
+    """Find every channel the bot is admin in and connect the unknown ones.
+
+    With a user account connected, it searches all channels that account
+    administers. Without one it can only re-check the channels this bot has
+    already seen (a bot can't list its own channels).
+    """
+    report: Dict[str, Any] = {
+        "via": "none", "error": "", "scanned": 0, "found": 0, "partial": False,
+        "added": [], "existing": [], "host": [], "need_permission": [], "failed": [],
+        "seen_again": 0,
+    }
+    found: List[Dict[str, Any]] = []
+
+    if userbot.logged_in():
+        me = await with_retry(bot.get_me, what="get_me")
+        search = await userbot.find_bot_channels(me.username or "")
+        report.update(via="account", error=search["error"], scanned=search["scanned"],
+                      partial=search["partial"], found=len(search["found"]))
+        found = list(search["found"])
+    # Channels the bot has seen in earlier updates (even when it failed to add
+    # them then) are always re-checked: this is the only source without /login.
+    known = store.data.get("known_chats", {})
+    ids_found = {item["id"] for item in found}
+    for key, title in known.items():
+        if int(key) not in ids_found:
+            found.append({"id": int(key), "title": title, "username": None,
+                          "seen": True})
+            report["seen_again"] += 1
+    if report["via"] == "none":
+        report["via"] = "seen"
+
+    outcome = await connect_discovered(bot, found)
+    report.update(outcome)
+    if outcome["added"]:
+        store.verified = True
+        store.awaiting_links = False
+        await store.save()
+    return report
+
+
 async def verify_target(bot: Bot, target: Any) -> Dict[str, Any]:
     """Resolve a target and confirm the bot is an admin there."""
     result: Dict[str, Any] = {"target": str(target), "ok": False, "reason": "", "chat": None}

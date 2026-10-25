@@ -52,9 +52,45 @@ channel to the pool:
 
 Set `AUTO_ADD=false` in `.env` to require `/load` instead.
 
-> Auto-detect fires on *future* promotions. For channels the bot is **already**
-> admin in, use `/load` once — Telegram sends no event for memberships that
-> predate the bot starting up, and the Bot API has no way to list them.
+> Auto-detect only sees a promotion **at the moment it happens**. If the bot was
+> stopped or restarting then, or the channel was promoted before the bot ever
+> ran, it never heard about it. That is what `/sync` fixes — see below.
+
+## Finding channels the bot is already admin in: `/sync`
+
+A bot **cannot ask Telegram which channels it is a member of** — the Bot API has
+no such call. So the bot looks from the other side, using the account you
+connected with `/login`:
+
+1. list every channel that account is an admin of
+2. ask Telegram, for each one, whether the **bot** is an admin there
+3. run the bot's own checks on each (admin, *Invite Users via Link*, a working
+   invite link) and connect the ones that pass
+
+```
+✅ Channels connected
+┃ ✅ Movies Backup · connected
+┃ ✅ Series Hub · connected
+┃ ❗ Old Channel · needs Invite Users via Link
+┃ 👤 Account    read 20 channels you admin
+┃ 🔎 Found      13 with the bot as admin
+┃ ✅ Connected  12 new
+```
+
+It runs by itself right after `/login`, at start-up, and every `SYNC_INTERVAL`
+seconds (default 6 hours; it only messages you when it connects something new).
+You can also run it any time with `/sync` or the **Sync channels** button in
+`/start`. It never duplicates a channel, and never uses the channel that hosts
+the redirect post as a target.
+
+**Limit:** only channels where the logged-in account is *also* an admin can be
+found this way. For any other, forward me a post from it or send its id with
+`/load`. Without `/login`, `/sync` can only re-check channels the bot has
+already seen (it remembers every channel it meets, even ones it failed to add).
+
+Also fixed: the bot no longer throws away queued updates when it starts, so a
+promotion made while it was down is processed once it is back (Telegram keeps
+them for 24 hours).
 
 ## Reliable link checks: `/login`
 
@@ -233,6 +269,7 @@ The panel covers all of these; the commands still work if you prefer typing.
 | `/login` | connect a user account for reliable link checks |
 | `/logout` | disconnect the user account |
 | `/scan` | check every channel right now |
+| `/sync` | find channels the bot is admin in and connect them |
 | `/cancel` | stop whatever is in progress |
 | `/icons` | show or switch the Premium icons |
 | `/load` | verify and load backup channels |
@@ -317,6 +354,7 @@ To use another icon: add a line to `tools/gen_icon_data.py` and regenerate
 | `REQUIRE_USERBOT` | `true` | pause monitoring until a user account is connected |
 | `DEATH_STRIKES` | `3` | failed checks in a row before a channel leaves the post |
 | `MIN_REQUEST_GAP` | `3` | minimum seconds between user-account requests |
+| `SYNC_INTERVAL` | `21600` | seconds between automatic searches for unknown channels (`0` = off; needs `/login`) |
 | `LINK_MODE` | `single` | `single` = every line shows the active channel, rest held in reserve · `spread` = rotate lines across the whole pool |
 | `AUTO_ADD` | `true` | auto-pool any channel the bot is promoted in |
 | `REPOST_IF_DELETED` | `false` | if the post is deleted: send a new one (`true`) or ask you to `.set` again (`false`) |

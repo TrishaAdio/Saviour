@@ -511,3 +511,69 @@ def icons_off() -> str:
         ("Reason", esc(icons.store.data.get("icons_reason", "Telegram did not show them"))),
     ], "Messages and buttons use standard emoji instead; nothing else changed. "
        "After getting Telegram Premium, send <code>/icons on</code>.")
+
+
+# ------------------------------------------------------- finding channels
+SYNC_LIST_MAX = 25
+
+
+def sync_running(has_account: bool) -> str:
+    if has_account:
+        note = ("Reading the channels this account admins, then checking the bot "
+                "in each one. This can take a minute; I'll edit this message.")
+    else:
+        note = "Re-checking the channels I've seen before."
+    return card(INFO, "Searching for channels", [
+        ("Via", "User account" if has_account else "Channels I've seen"),
+    ], note)
+
+
+def sync_report(r: dict) -> str:
+    if r.get("busy"):
+        return card(INFO, "Search already running", (),
+                    "Wait for it to finish, then try again.")
+    added, existing = r["added"], r["existing"]
+    need, failed, host = r["need_permission"], r["failed"], r["host"]
+    account = r["via"] == "account"
+
+    rows: List[Row] = []
+    if account:
+        rows.append(("Account", f"read {r['scanned']} channels you admin"))
+    if account:
+        rows.append(("Found", f"{r['found']} with the bot as admin"))
+    else:
+        rows.append(("Checked", f"{r['seen_again']} channels I've seen before"))
+    rows.append(("Connected", f"{len(added)} new"))
+    if existing:
+        rows.append(("Already known", str(len(existing))))
+    if need:
+        rows.append(("Missing", f"{len(need)} need Invite Users via Link"))
+
+    items = [f"{icons.tg('good')} <b>{esc(t)}</b> · connected" for t in added]
+    items += [f"{icons.tg('warn')} <b>{esc(t)}</b> · needs <i>Invite Users via "
+              "Link</i>" for t in need]
+    items += [f"{icons.tg('bad')} <b>{esc(t)}</b> · {esc(why)}" for t, why in failed]
+    if len(items) > SYNC_LIST_MAX:
+        extra = len(items) - SYNC_LIST_MAX
+        items = items[:SYNC_LIST_MAX] + [f"<i>… and {extra} more</i>"]
+
+    notes = []
+    if r.get("error"):
+        notes.append(f"Stopped early: {esc(r['error'])}.")
+    if host:
+        notes.append(f"{esc(host[0])} shows the redirect post, so it isn't used as a target.")
+    if not account:
+        notes.append("Telegram doesn't let a bot list its own channels, so I can "
+                     "only re-check ones I've seen. Send <code>/login</code> and "
+                     "I'll find them all, or forward me one post from a channel.")
+    else:
+        if not r["found"] and not r.get("error"):
+            notes.append("No channel has both this account and the bot as admin.")
+        notes.append("Only channels where the logged-in account is also an admin "
+                     "can be found. For any other, forward me a post from it or "
+                     "send its id.")
+
+    severity = OK if added else (WARN if (need or failed or r.get("error")) else INFO)
+    title = ("Channels connected" if added else
+             "Nothing new to connect" if not (need or failed) else "Sync needs attention")
+    return card(severity, title, rows, "\n".join(notes), items)

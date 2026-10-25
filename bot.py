@@ -130,9 +130,10 @@ async def handle_login_step(update: Update, context: ContextTypes.DEFAULT_TYPE,
         context.user_data.pop("login", None)
         await message.reply_text(ui.login_done(info), parse_mode=ParseMode.HTML)
         log.info("userbot signed in as %s", info)
-        # Now that checks are trustworthy, take a baseline of every channel.
-        if store.channels:
-            await run_scan(context, message)
+        # Now that checks are trustworthy: find the channels the bot is admin
+        # in, then take a baseline of every channel. In the background, so the
+        # bot keeps answering while it works.
+        context.application.create_task(after_login(context, message))
         return
     if step == "failed":
         context.user_data.pop("login", None)
@@ -308,6 +309,76 @@ async def cmd_icons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(ui.icons_off(), parse_mode=ParseMode.HTML)
 
 
+_sync_running = False
+
+
+async def do_sync(context: ContextTypes.DEFAULT_TYPE) -> dict:
+    """One search + connect run. Only one at a time."""
+    global _sync_running
+    if _sync_running or userbot.finding():
+        return {"busy": True}
+    _sync_running = True
+    try:
+        report = await core.sync_channels(context.bot)
+        if report["added"] and store.post:
+            report["post"] = await core.refresh_post(context.bot)
+        log.info("sync via %s: scanned %s, found %s, added %s, existing %s, "
+                 "need permission %s, failed %s", report["via"], report["scanned"],
+                 report["found"], len(report["added"]), len(report["existing"]),
+                 len(report["need_permission"]), len(report["failed"]))
+        return report
+    finally:
+        _sync_running = False
+
+
+async def after_login(context: ContextTypes.DEFAULT_TYPE, message) -> None:
+    note = await message.reply_text(ui.sync_running(True), parse_mode=ParseMode.HTML)
+    await _finish_sync(context, note)
+    if store.channels:
+        await run_scan(context, message)
+
+
+async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Find every channel the bot is admin in and connect the unknown ones."""
+    if not is_owner(update):
+        return
+    note = await update.message.reply_text(ui.sync_running(userbot.logged_in()),
+                                           parse_mode=ParseMode.HTML)
+    # Long searches must not block the bot, so run in the background and edit
+    # this one message with the result.
+    context.application.create_task(_finish_sync(context, note))
+
+
+async def _finish_sync(context: ContextTypes.DEFAULT_TYPE, note) -> None:
+    try:
+        report = await do_sync(context)
+        text = ui.sync_report(report)
+    except Exception as exc:  # noqa: BLE001 - tell the owner instead of going silent
+        log.exception("sync failed")
+        text = ui.problem("Sync failed", f"<code>{ui.esc(type(exc).__name__)}</code>: "
+                          f"{ui.esc(str(exc)[:200])}")
+    try:
+        await note.edit_text(text, parse_mode=ParseMode.HTML,
+                             disable_web_page_preview=True)
+    except BadRequest as exc:
+        if "not modified" not in (exc.message or "").lower():
+            await note.reply_text(text, parse_mode=ParseMode.HTML,
+                                  disable_web_page_preview=True)
+
+
+async def auto_sync(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Quietly look for unknown channels now and then; speak only if one is new."""
+    if not userbot.logged_in() or userbot.cooling_down():
+        return
+    try:
+        report = await do_sync(context)
+    except Exception:  # noqa: BLE001 - a background job must never raise
+        log.exception("automatic sync failed")
+        return
+    if report.get("added"):
+        await notify_owner(context, ui.sync_report(report))
+
+
 async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_owner(update):
         return
@@ -411,6 +482,23 @@ async def send_screen(update: Update, screen) -> None:
     )
 
 
+async def _sync_into_panel(context: ContextTypes.DEFAULT_TYPE, query) -> None:
+    try:
+        report = await do_sync(context)
+        text, keyboard = menu.sync_done(report)
+    except Exception as exc:  # noqa: BLE001 - show it instead of leaving "searching"
+        log.exception("sync from the panel failed")
+        text = ui.problem("Sync failed", f"<code>{ui.esc(type(exc).__name__)}</code>")
+        keyboard = menu._kb([menu._back()])
+    try:
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML,
+                                      reply_markup=keyboard,
+                                      disable_web_page_preview=True)
+    except BadRequest as exc:
+        if "not modified" not in (exc.message or "").lower():
+            log.warning("could not show the sync result: %s", exc)
+
+
 async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Every panel button lands here and edits the same message in place."""
     query = update.callback_query
@@ -491,6 +579,19 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     elif action == "add":
         context.user_data["awaiting_load"] = True
         screen = menu.add()
+    elif action == "sync":
+        # Long-running: answer now, show "searching", and let a background task
+        # edit this same message when it has the result.
+        await query.answer("Searching for channels…")
+        text, keyboard = menu.sync_running()
+        try:
+            await query.edit_message_text(text, parse_mode=ParseMode.HTML,
+                                          reply_markup=keyboard,
+                                          disable_web_page_preview=True)
+        except BadRequest:
+            pass
+        context.application.create_task(_sync_into_panel(context, query))
+        return
     elif action == "help":
         screen = menu.help_screen()
     elif action == "close":
@@ -680,6 +781,14 @@ async def on_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         if status == ChatMemberStatus.ADMINISTRATOR and chat.type in ("group", "supergroup"):
             await notify_owner(context, ui.group_ignored(chat.title or chat.id))
         return
+
+    # Remember it, so /sync can try again even if adding it fails right now.
+    known = store.data.setdefault("known_chats", {})
+    if status == ChatMemberStatus.ADMINISTRATOR:
+        known[str(chat.id)] = chat.title or str(chat.id)
+    else:
+        known.pop(str(chat.id), None)
+    await store.save()
 
     # ---------------------------------------------------- lost access
     if status != ChatMemberStatus.ADMINISTRATOR:
@@ -963,6 +1072,7 @@ def main() -> None:
     app.add_handler(CommandHandler("cancel", cmd_cancel, private))
     app.add_handler(CommandHandler("scan", cmd_scan, private))
     app.add_handler(CommandHandler("icons", cmd_icons, private))
+    app.add_handler(CommandHandler("sync", cmd_sync, private))
     app.add_handler(CommandHandler("status", cmd_status, private))
     app.add_handler(CommandHandler("refresh", cmd_refresh, private))
     app.add_handler(CommandHandler("remove", cmd_remove, private))
@@ -993,8 +1103,13 @@ def main() -> None:
         health_check, interval=config.CHECK_INTERVAL, first=30, name="health_check"
     )
 
+    if config.SYNC_INTERVAL > 0:
+        app.job_queue.run_repeating(
+            auto_sync, interval=config.SYNC_INTERVAL, first=45, name="auto_sync"
+        )
+
     log.info("polling…")
-    app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":

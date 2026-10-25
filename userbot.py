@@ -25,7 +25,7 @@ import config
 log = logging.getLogger(__name__)
 
 try:
-    from telethon import TelegramClient, errors, functions, types
+    from telethon import TelegramClient, errors, functions, types, utils
     from telethon.sessions import StringSession
     AVAILABLE = True
 except ImportError:  # telethon not installed yet
@@ -265,6 +265,98 @@ async def _ask(client, url: str, invite, public) -> Tuple[Optional[bool], str]:
             else (LIVE, "Channel is reachable")
 
     return UNKNOWN, "not a t.me channel link"
+
+
+# ------------------------------------------------- finding the bot's channels
+_finding = False
+DIALOG_BATCH = 100
+
+
+def finding() -> bool:
+    return _finding
+
+
+async def find_bot_channels(bot_username: str) -> Dict[str, Any]:
+    """Channels where this account AND the bot are both admins.
+
+    The Bot API cannot list the channels a bot belongs to, so this asks from the
+    user account's side: list the channels it administers, then ask Telegram
+    whether the bot is an admin in each. Read-only, paced like every other
+    request, and it stops at once on a flood-wait.
+
+    Returns ``{"ok", "error", "scanned", "found": [{id, title, username}],
+    "partial"}``.
+    """
+    global _finding, _flood_until
+    out: Dict[str, Any] = {"ok": False, "error": "", "scanned": 0, "found": [],
+                           "partial": False}
+    left = cooling_down()
+    if left:
+        out["error"] = f"Telegram asked the account to slow down ({left}s left)"
+        return out
+    if _finding:
+        out["error"] = "a search is already running"
+        return out
+    client = await connected()
+    if client is None:
+        out["error"] = "no user account connected"
+        return out
+
+    _finding = True
+    try:
+        bot_input = await client.get_input_entity(bot_username.lstrip("@"))
+
+        # Telethon loads dialogs in batches of 100, so one request happens each
+        # time 100 have been read. Pause there - not after every dialog.
+        candidates, seen = [], 0
+        await _pace()
+        async for dialog in client.iter_dialogs(ignore_migrated=True):
+            seen += 1
+            if seen % DIALOG_BATCH == 0:
+                await _pace()
+            ent = dialog.entity
+            if isinstance(ent, types.Channel) and ent.broadcast \
+                    and (ent.creator or ent.admin_rights):
+                candidates.append(ent)
+        out["scanned"] = len(candidates)
+
+        for ent in candidates:
+            await _pace()
+            try:
+                res = await client(functions.channels.GetParticipantRequest(
+                    channel=ent, participant=bot_input))
+            except errors.UserNotParticipantError:
+                continue                      # the bot isn't in this channel
+            except (errors.ChatAdminRequiredError, errors.ChannelPrivateError,
+                    errors.ChannelInvalidError) as exc:
+                log.info("cannot inspect %s: %s", getattr(ent, "title", "?"), exc)
+                continue
+            if isinstance(res.participant, (types.ChannelParticipantAdmin,
+                                            types.ChannelParticipantCreator)):
+                out["found"].append({
+                    "id": utils.get_peer_id(ent),
+                    "title": ent.title or str(ent.id),
+                    "username": getattr(ent, "username", None),
+                })
+        out["ok"] = True
+    except errors.FloodWaitError as exc:
+        _flood_until = time.monotonic() + exc.seconds + 5
+        out.update(partial=True, error=f"Telegram asked the account to slow down "
+                                       f"for {exc.seconds}s")
+        log.warning("channel search hit a flood wait of %ss", exc.seconds)
+    except (errors.AuthKeyUnregisteredError, errors.SessionRevokedError,
+            errors.UserDeactivatedError) as exc:
+        global _broken
+        _broken = True
+        await disconnect()
+        out["error"] = "the user account's session is no longer valid - /login again"
+        log.error("userbot session is no longer valid: %s", exc)
+    except Exception as exc:  # noqa: BLE001 - report instead of crashing the bot
+        log.warning("channel search failed: %s: %s", type(exc).__name__, exc)
+        out["error"] = f"{type(exc).__name__}: {exc}"
+    finally:
+        _finding = False
+    return out
 
 
 # ------------------------------------------------------- login journey
