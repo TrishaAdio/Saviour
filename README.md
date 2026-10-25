@@ -234,6 +234,7 @@ The panel covers all of these; the commands still work if you prefer typing.
 | `/logout` | disconnect the user account |
 | `/scan` | check every channel right now |
 | `/cancel` | stop whatever is in progress |
+| `/icons` | show or switch the Premium icons |
 | `/load` | verify and load backup channels |
 | `/status` | pool, active channel, post location |
 | `/refresh` | re-render the post right now |
@@ -245,15 +246,18 @@ The panel covers all of these; the commands still work if you prefer typing.
 
 ## Notifications
 
-Every DM uses the same card layout: a colour-coded title, a details panel, and
-at most one line telling you what happens next or what to do.
+Every DM uses the same card layout: an icon title, a details panel (every row
+has its own icon), and at most one line telling you what happens next or what
+to do. The title icon shows how serious it is:
 
-| dot | meaning |
+| icon | meaning |
 |---|---|
-| 🟢 | done: channel connected, post linked |
-| 🔵 | info: startup, status |
-| 🟠 | needs attention: missing permission, channel disconnected |
-| 🔴 | critical: channel offline, no live links left |
+| check circle | done: channel connected, post linked |
+| info circle | info: startup, status |
+| exclamation | needs attention: missing permission, channel not responding |
+| cross circle | critical: channel taken out, no live links left |
+
+With icons off these are the coloured dots 🟢 🔵 🟠 🔴.
 
 ```
 🔴 Channel offline
@@ -266,6 +270,38 @@ at most one line telling you what happens next or what to do.
 When the pool runs dry you get a 🔴 *Action required · no live links* card.
 Paste a new channel link in the chat and the post is fixed immediately. Run
 `/preview` to see samples.
+
+## Premium icons
+
+The whole interface (message titles, every detail row, and every button) uses
+the [tgmacicons](https://t.me/addemoji/tgmacicons) pack. Buttons get their icon
+through `icon_custom_emoji_id`, and the important ones are coloured: **Remove**
+and **Stop monitoring** are red, **Make active** and **Refresh links** blue,
+**Add channels** and **Use it anyway** green.
+
+**Telegram only allows this when the bot's owner has Telegram Premium.** The bot
+is built so a missing subscription costs nothing but the icons:
+
+- If Telegram **refuses** a message because of an icon, it is sent again
+  immediately without icons, so no alert is ever lost.
+- If Telegram **accepts it but silently drops the icons** (the usual case
+  without Premium), the bot notices from Telegram's reply. After two in a row
+  it switches icons off, saves that, and tells you once.
+- Everything falls back to the old look: coloured dots, `🗑`/`⭐` button prefixes,
+  no row icons. Layout and behaviour are identical.
+
+| command | |
+|---|---|
+| `/icons` | show whether icons are on |
+| `/icons on` | turn them on (and test it: if Telegram strips them, it turns them off again and says why) |
+| `/icons off` | turn them off |
+
+`CUSTOM_EMOJI=false` in `.env` sets the default. After getting Premium, send
+`/icons on`. The channel post itself is never touched: icons only appear in
+messages the bot sends **to you**.
+
+To use another icon: add a line to `tools/gen_icon_data.py` and regenerate
+`icon_data.py` from the pack JSON; IDs are never typed by hand.
 
 ## `.env`
 
@@ -284,6 +320,7 @@ Paste a new channel link in the chat and the post is fixed immediately. Run
 | `LINK_MODE` | `single` | `single` = every line shows the active channel, rest held in reserve · `spread` = rotate lines across the whole pool |
 | `AUTO_ADD` | `true` | auto-pool any channel the bot is promoted in |
 | `REPOST_IF_DELETED` | `false` | if the post is deleted: send a new one (`true`) or ask you to `.set` again (`false`) |
+| `CUSTOM_EMOJI` | `true` | use the Premium icon pack (needs the owner to have Telegram Premium; the bot turns it off by itself if Telegram doesn't show it) |
 | `EXPANDABLE_QUOTE` | `false` | collapsible quote box (plain `.set` only) |
 | `MIN_CHANNELS` | `1` | beg the owner below this many live channels |
 
@@ -297,6 +334,9 @@ bot.py        handlers, watchdog job, owner pings
 core.py       link parsing, admin checks, post rendering + editing
 template.py   clones a post's formatting and swaps only its links
 ui.py         owner notification cards
+icons.py      Premium icons: rendering, buttons, fallback to plain emoji
+icon_data.py  generated icon ids (tools/gen_icon_data.py)
+safebot.py    sends again without icons if Telegram refuses them
 menu.py       inline-button control panel
 userbot.py    optional user account (/login) that verifies links with Telegram
 storage.py    JSON state

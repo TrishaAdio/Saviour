@@ -56,6 +56,11 @@ DEATH_STRIKES = max(_int("DEATH_STRIKES", 3), 1)
 # account well inside Telegram's limits.
 MIN_REQUEST_GAP = max(_int("MIN_REQUEST_GAP", 3), 1)
 
+# Premium icons (tgmacicons pack) in messages and on buttons. They need the bot
+# owner to have Telegram Premium; if Telegram doesn't show them the bot turns
+# them off by itself. /icons on|off changes this at runtime.
+CUSTOM_EMOJI = _bool("CUSTOM_EMOJI", True)
+
 # Optional bold line above the links, used only for a plain ".set" (a reply
 # ".set" copies the original post exactly). "none" or empty = no title line,
 # which matches a post that is just the quote box of links.

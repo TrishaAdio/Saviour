@@ -27,9 +27,13 @@ from typing import List, Optional, Tuple
 from telegram import InlineKeyboardButton as Btn
 from telegram import InlineKeyboardMarkup
 
+
 import config
+import icons
 import ui
 from storage import store
+
+B = icons.button  # B(label, icon, callback_data, style=None)
 
 PAGE_SIZE = 8
 Screen = Tuple[str, InlineKeyboardMarkup]
@@ -39,8 +43,8 @@ def _kb(rows: List[List[Btn]]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
-def _back(to: str = "m:home", label: str = "‹ Back") -> List[Btn]:
-    return [Btn(label, callback_data=to)]
+def _back(to: str = "m:home", label: str = "Back") -> List[Btn]:
+    return [B(label, "back", to)]
 
 
 def _short(text: str, limit: int = 28) -> str:
@@ -81,12 +85,12 @@ def home() -> Screen:
                    "a user account — without it I can't tell a live channel from a "
                    "dead one, so I won't guess.")
     return text, _kb([
-        [Btn("📊 Status", callback_data="m:status"),
-         Btn(f"📡 Channels · {pool}", callback_data="m:chs:0")],
-        [Btn("📝 Redirect post", callback_data="m:post"),
-         Btn("➕ Add channels", callback_data="m:add")],
-        [Btn("❔ How it works", callback_data="m:help"),
-         Btn("✕ Close", callback_data="m:close")],
+        [B("Status", "stats", "m:status"),
+         B(f"Channels · {pool}", "channel", "m:chs:0")],
+        [B("Redirect post", "post", "m:post"),
+         B("Add channels", "add", "m:add", "success")],
+        [B("How it works", "book", "m:help"),
+         B("Close", "close", "m:close")],
     ])
 
 
@@ -94,7 +98,7 @@ def home() -> Screen:
 def status() -> Screen:
     text = ui.status(store.channels, store.post, _spread(), store.data.get("last_check"))
     return text, _kb([
-        [Btn("↻ Update", callback_data="m:status")],
+        [B("Update", "refresh", "m:status")],
         _back(),
     ])
 
@@ -106,7 +110,7 @@ def channels(page: int = 0) -> Screen:
         text = ui.card(ui.WARN, "Channels", [("Pool", "<b>empty</b>")],
                        "Make me admin in a channel and it connects automatically, "
                        "or add one manually.")
-        return text, _kb([[Btn("➕ Add channels", callback_data="m:add")], _back()])
+        return text, _kb([[B("Add channels", "add", "m:add", "success")], _back()])
 
     pages = max((len(chans) - 1) // PAGE_SIZE + 1, 1)
     page = min(max(page, 0), pages - 1)
@@ -115,7 +119,8 @@ def channels(page: int = 0) -> Screen:
 
     note = "Tap a channel to manage it."
     if not _spread():
-        note = "⭐ shown in the post · ⚠️ offline. " + note
+        note = (f"{icons.tg('active')} shown in the post · "
+                f"{icons.tg('offline')} offline. " + note)
     rows = [("Working", ui.pool_value(len(store.online())))]
     if store.offline():
         rows.append(("Offline", f"{len(store.offline())} · re-checked every round"))
@@ -127,13 +132,13 @@ def channels(page: int = 0) -> Screen:
     active_id = online[0]["id"] if online and not _spread() else None
     buttons = []
     for ch in chunk:
-        mark = "⚠️ " if ch.get("offline") else ("⭐ " if ch["id"] == active_id else "")
-        buttons.append([Btn(f"{mark}{_short(ch['title'])}", callback_data=f"m:ch:{ch['id']}")])
+        icon = "offline" if ch.get("offline") else ("active" if ch["id"] == active_id else "link")
+        buttons.append([B(_short(ch["title"]), icon, f"m:ch:{ch['id']}")])
     nav = []
     if page > 0:
-        nav.append(Btn("‹ Prev", callback_data=f"m:chs:{page - 1}"))
+        nav.append(B("Prev", "back", f"m:chs:{page - 1}"))
     if page < pages - 1:
-        nav.append(Btn("Next ›", callback_data=f"m:chs:{page + 1}"))
+        nav.append(B("Next", "next", f"m:chs:{page + 1}"))
     if nav:
         buttons.append(nav)
     buttons.append(_back())
@@ -172,11 +177,11 @@ def channel(chat_id: int) -> Optional[Screen]:
 
     rows = []
     if parked:
-        rows.append([Btn("✅ Use it anyway", callback_data=f"m:act:{chat_id}")])
+        rows.append([B("Use it anyway", "use", f"m:act:{chat_id}", "success")])
     elif not active and not _spread():
-        rows.append([Btn("⭐ Make active", callback_data=f"m:act:{chat_id}")])
-    rows.append([Btn("🗑 Remove", callback_data=f"m:rm:{chat_id}")])
-    rows.append(_back(f"m:chs:{index // PAGE_SIZE}", "‹ Channels"))
+        rows.append([B("Make active", "active", f"m:act:{chat_id}", "primary")])
+    rows.append([B("Remove", "trash", f"m:rm:{chat_id}", "danger")])
+    rows.append(_back(f"m:chs:{index // PAGE_SIZE}", "Channels"))
     return text, _kb(rows)
 
 
@@ -192,8 +197,8 @@ def confirm_remove(chat_id: int) -> Optional[Screen]:
         ("ID", ui.code(ch["id"])),
     ], warn)
     return text, _kb([
-        [Btn("Remove", callback_data=f"m:rmok:{chat_id}"),
-         Btn("Cancel", callback_data=f"m:ch:{chat_id}")],
+        [B("Remove", "trash", f"m:rmok:{chat_id}", "danger"),
+         B("Cancel", "cancel", f"m:ch:{chat_id}")],
     ])
 
 
@@ -217,15 +222,15 @@ def post() -> Screen:
         "The link count follows your post. Edit the post and reply "
         "<code>.set</code> again to change it.")
 
-    rows = [[Btn("↻ Refresh links", callback_data="m:refresh")]]
+    rows = [[B("Refresh links", "refresh", "m:refresh", "primary")]]
     if not cloned:
         n = p["slots"]
         rows.append([
-            Btn("−", callback_data=f"m:lines:{max(n - 1, 1)}"),
-            Btn(f"{n} lines", callback_data="m:post"),
-            Btn("+", callback_data=f"m:lines:{min(n + 1, 20)}"),
+            B("−", None, f"m:lines:{max(n - 1, 1)}"),
+            B(f"{n} lines", None, "m:post"),
+            B("+", None, f"m:lines:{min(n + 1, 20)}"),
         ])
-    rows.append([Btn("⏹ Stop monitoring", callback_data="m:unset")])
+    rows.append([B("Stop monitoring", "stop", "m:unset", "danger")])
     rows.append(_back())
     return text, _kb(rows)
 
@@ -235,15 +240,15 @@ def confirm_unset() -> Screen:
                    "The post stays in your channel, but its links will no longer "
                    "be updated when a channel goes down.")
     return text, _kb([
-        [Btn("Stop monitoring", callback_data="m:unsetok"),
-         Btn("Cancel", callback_data="m:post")],
+        [B("Stop monitoring", "stop", "m:unsetok", "danger"),
+         B("Cancel", "cancel", "m:post")],
     ])
 
 
 # --------------------------------------------------------- add / help
 def add() -> Screen:
     text = (
-        f"{ui.INFO} <b>Add channels</b>\n"
+        f"{ui.dot(ui.INFO)} <b>Add channels</b>\n"
         "<b>Automatic</b>\nMake me admin in a channel with <i>Invite Users via "
         "Link</i>. It connects on its own.\n\n"
         "<b>Manual</b>\nSend the channels in this chat now, one per line:\n"
@@ -257,7 +262,7 @@ def add() -> Screen:
 def help_screen() -> Screen:
     minutes = max(config.CHECK_INTERVAL // 60, 1)
     text = (
-        f"{ui.INFO} <b>How it works</b>\n"
+        f"{ui.dot(ui.INFO)} <b>How it works</b>\n"
         "<blockquote><b>1.</b> Make me admin in your backup channels. They connect "
         "automatically.\n"
         "<b>2.</b> In your public channel, reply <code>.set</code> to your redirect "
@@ -271,10 +276,11 @@ def help_screen() -> Screen:
         "<code>/scan</code>  Check every channel now\n"
         "<code>/load</code>  Add channels by link or id\n"
         "<code>/preview</code>  Sample notifications\n"
+        "<code>/icons</code>  Turn Premium icons on or off\n"
         "<code>/cancel</code>  Stop what's in progress"
     )
     return text, _kb([_back()])
 
 
 def closed() -> str:
-    return f"{ui.INFO} <b>Panel closed</b>\nSend /start to open it again."
+    return f"{ui.dot(ui.INFO)} <b>Panel closed</b>\nSend /start to open it again."
