@@ -68,6 +68,7 @@ def home() -> Screen:
         ("Health", health),
         ("Channels", ui.pool_value(pool)),
         ("Post", "Monitored" if post else "Not linked"),
+        ("Last check", ui.ago(store.data.get("last_check"))),
     ], "Choose an option below.")
     return text, _kb([
         [Btn("📊 Status", callback_data="m:status"),
@@ -81,7 +82,7 @@ def home() -> Screen:
 
 # -------------------------------------------------------------- status
 def status() -> Screen:
-    text = ui.status(store.channels, store.post, _spread())
+    text = ui.status(store.channels, store.post, _spread(), store.data.get("last_check"))
     return text, _kb([
         [Btn("↻ Update", callback_data="m:status")],
         _back(),

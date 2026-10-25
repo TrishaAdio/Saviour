@@ -6,6 +6,7 @@ import logging
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
+import httpx
 from telegram import Bot, Message
 from telegram.constants import ChatMemberStatus, ParseMode
 from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter, TimedOut
@@ -202,7 +203,11 @@ async def verify_target(bot: Bot, target: Any) -> Dict[str, Any]:
 
 
 async def is_channel_alive(bot: Bot, channel: Dict[str, Any]) -> bool:
-    """False only on a definite failure - transient network errors keep it alive."""
+    """Bot API view only: does the chat exist and am I still admin there?
+
+    This is NOT enough on its own - a channel banned by Telegram or a revoked
+    invite can still look fine here. ``check_channel`` adds a real link check.
+    """
     try:
         await with_retry(bot.get_chat, channel["id"], what=f"get_chat {channel['id']}")
         return await with_retry(bot_is_admin, bot, channel["id"],
@@ -213,6 +218,93 @@ async def is_channel_alive(bot: Bot, channel: Dict[str, Any]) -> bool:
     except TRANSIENT as exc:
         log.warning("transient error checking %s: %s - keeping it", channel["id"], exc)
         return True
+
+
+# ------------------------------------------------- real link checking
+# What a user sees when opening the link. A working channel link renders a
+# page with the channel title (tgme_page_title) and member count. A revoked
+# or expired invite, or a deleted/banned channel, renders a generic page
+# without a title; an unknown public username redirects to telegram.org.
+LINK_CHECK_UA = "Mozilla/5.0 (compatible; SaviourBot/1.0; +link-check)"
+CONTROL_URL = "https://t.me/telegram"  # always-live page, proves t.me is answering
+
+
+async def link_is_live(url: str) -> Optional[bool]:
+    """True = working link, False = dead link, None = couldn't tell."""
+    if not url.startswith("http"):
+        url = "https://" + url
+    try:
+        async with httpx.AsyncClient(timeout=config.HTTP_TIMEOUT, follow_redirects=False,
+                                     headers={"User-Agent": LINK_CHECK_UA}) as client:
+            resp = await client.get(url)
+    except httpx.HTTPError as exc:
+        log.warning("link check for %s failed to connect: %s", url, exc)
+        return None
+    if resp.status_code in (301, 302, 303, 307, 308):
+        return False  # unknown username -> redirected to telegram.org
+    if resp.status_code != 200:
+        log.warning("link check for %s got HTTP %s", url, resp.status_code)
+        return None
+    return "tgme_page_title" in resp.text
+
+
+async def confirm_dead(url: str) -> Optional[bool]:
+    """Re-check a link that looked dead, and make sure t.me itself is sane.
+
+    Returns True only when the link failed twice *and* the control page loads
+    normally, so a t.me hiccup never gets a healthy channel dropped.
+    """
+    await asyncio.sleep(3)
+    again = await link_is_live(url)
+    if again is not False:
+        return None if again is None else False
+    control = await link_is_live(CONTROL_URL)
+    if control is not True:
+        log.warning("t.me control page not normal (%s) - not trusting link checks now", control)
+        return None
+    return True
+
+
+async def check_channel(bot: Bot, channel: Dict[str, Any]) -> Tuple[str, str]:
+    """Full health check of one pooled channel.
+
+    Returns ``(state, reason)`` where state is one of:
+      ok        link works
+      relinked  old link was dead, a fresh working link was created and saved
+      dead      channel is gone or unreachable for users - drop it
+      unknown   couldn't verify (network); keep it and retry next round
+    """
+    cid = channel["id"]
+
+    # 1. Bot API: chat exists and I'm still admin
+    try:
+        await with_retry(bot.get_chat, cid, what=f"get_chat {cid}")
+        if not await with_retry(bot_is_admin, bot, cid, what=f"admin check {cid}"):
+            return "dead", "Bot is no longer admin"
+    except (BadRequest, Forbidden) as exc:
+        return "dead", f"Channel unavailable ({getattr(exc, 'message', exc)})"
+    except TRANSIENT as exc:
+        log.warning("bot API check of %s inconclusive: %s", cid, exc)
+        return "unknown", "Telegram did not respond"
+
+    # 2. The link as users see it
+    live = await link_is_live(channel["link"])
+    if live is not False:
+        return ("ok", "") if live else ("unknown", "Link check inconclusive")
+    confirmed = await confirm_dead(channel["link"])
+    if confirmed is None:
+        return "unknown", "Link check inconclusive"
+
+    # 3. Link is dead but the bot can still manage the channel: try a new link.
+    log.warning("link %s for %s is dead - creating a new one", channel["link"], cid)
+    new_link, reason = await fetch_invite_link(bot, cid, channel.get("title") or "")
+    if new_link and new_link != channel["link"]:
+        await asyncio.sleep(2)  # give t.me a moment to know the new invite
+        if await link_is_live(new_link) is True:
+            channel["link"] = new_link
+            await store.save()
+            return "relinked", "Old invite link stopped working"
+    return "dead", "Link no longer works for users (channel banned or deleted)"
 
 
 # ------------------------------------------------------- post rendering
