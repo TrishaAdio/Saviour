@@ -56,6 +56,33 @@ Set `AUTO_ADD=false` in `.env` to require `/load` instead.
 > admin in, use `/load` once — Telegram sends no event for memberships that
 > predate the bot starting up, and the Bot API has no way to list them.
 
+## Reliable link checks: `/login`
+
+A **bot account cannot ask Telegram whether an invite link still works** — that
+is a hard limit of the Bot API. Without help, the bot can only open `t.me` and
+guess from the page, which gets it wrong.
+
+Connect a user account once and Telegram answers directly:
+
+1. Get `api_id` and `api_hash` from [my.telegram.org](https://my.telegram.org/apps)
+   → *API development tools*
+2. DM the bot `/login` and follow the steps (api_id, api_hash, phone, the login
+   code, and the two-step password if the account has one)
+
+From then on every check calls `messages.checkChatInvite` /
+`contacts.resolveUsername`, so a **revoked invite, a banned channel or a deleted
+channel is detected for certain**. `/start` shows `Verify: User account @you`
+when it's active. `/logout` disconnects it.
+
+> **Security.** The session grants full access to that account — use a spare one
+> if you can. The bot deletes the api_hash, code and password messages as they
+> arrive, and stores the session in `session.json` with owner-only permissions
+> (`chmod 600`). It is in `.gitignore`; never commit or share it. `/logout`
+> signs the account out and deletes the file.
+
+Putting `API_ID` and `API_HASH` in `.env` (or answering them in `setup.py`) makes
+`/login` ask only for the phone number and code.
+
 ## Keep it running (important)
 
 If the bot isn't running, nothing gets swapped. Running `python3 bot.py` in an
@@ -106,10 +133,11 @@ isn't running.
 
    The line count comes from `POST_SLOTS` in `.env` (default **5**). Override it
    per post with `.set 3`, or change it live with `/slots 5`.
-4. From then on it checks every linked channel on a timer, **including opening
-   each invite link the way a user would**. A channel that's deleted, banned by
-   Telegram, or whose link stopped working is dropped (or gets a fresh link if
-   the bot can still make one), and the post is **edited** to show a live link.
+4. From then on it checks every linked channel on a timer, **asking Telegram
+   whether each invite link still works** (see `/login` below). A channel that's
+   deleted, banned by Telegram, or whose link stopped working is dropped (or
+   gets a fresh link if the bot can still make one), and the post is **edited**
+   to show a live link.
 5. Pool empty → you get an *Action required · no live links* DM. Reply with new
    links in the same chat; it verifies them and updates the post immediately,
    no `/load` needed.
@@ -147,6 +175,9 @@ The panel covers all of these; the commands still work if you prefer typing.
 | command | |
 |---|---|
 | `/start` | open the control panel |
+| `/login` | connect a user account for reliable link checks |
+| `/logout` | disconnect the user account |
+| `/cancel` | stop whatever is in progress |
 | `/load` | verify and load backup channels |
 | `/status` | pool, active channel, post location |
 | `/refresh` | re-render the post right now |
@@ -190,6 +221,7 @@ Paste a new channel link in the chat and the post is fixed immediately. Run
 | `POST_TITLE` | `none` | bold line above the links (plain `.set` only); `none` = no title |
 | `CHECK_INTERVAL` | `300` | seconds between health checks |
 | `HTTP_TIMEOUT` | `20` | seconds to wait for Telegram before a request counts as timed out |
+| `API_ID` / `API_HASH` | — | optional, from my.telegram.org; lets `/login` skip straight to the phone number |
 | `LINK_MODE` | `single` | `single` = every line shows the active channel, rest held in reserve · `spread` = rotate lines across the whole pool |
 | `AUTO_ADD` | `true` | auto-pool any channel the bot is promoted in |
 | `REPOST_IF_DELETED` | `false` | if the post is deleted: send a new one (`true`) or ask you to `.set` again (`false`) |
@@ -207,6 +239,7 @@ core.py       link parsing, admin checks, post rendering + editing
 template.py   clones a post's formatting and swaps only its links
 ui.py         owner notification cards
 menu.py       inline-button control panel
+userbot.py    optional user account (/login) that verifies links with Telegram
 storage.py    JSON state
 config.py     .env loader
 ```

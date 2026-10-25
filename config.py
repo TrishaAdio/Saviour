@@ -38,6 +38,11 @@ CHECK_INTERVAL = _int("CHECK_INTERVAL", 300)
 # Seconds to wait for Telegram before a request counts as timed out.
 HTTP_TIMEOUT = _int("HTTP_TIMEOUT", 20)
 
+# Optional user account used to verify links (see /login). If these are set
+# here, /login only asks for the phone number and code.
+API_ID = _int("API_ID", 0)
+API_HASH = (os.getenv("API_HASH") or "").strip()
+
 # Optional bold line above the links, used only for a plain ".set" (a reply
 # ".set" copies the original post exactly). "none" or empty = no title line,
 # which matches a post that is just the quote box of links.

@@ -64,12 +64,18 @@ def home() -> Screen:
     else:
         dot, health = ui.OK, "Protected"
 
+    import userbot
+    if not userbot.logged_in() and dot == ui.OK:
+        dot, health = ui.WARN, "Link checks unverified"
     text = ui.card(dot, "Saviour control panel", [
         ("Health", health),
         ("Channels", ui.pool_value(pool)),
         ("Post", "Monitored" if post else "Not linked"),
+        ("Verify", ui.verify_method()),
         ("Last check", ui.ago(store.data.get("last_check"))),
-    ], "Choose an option below.")
+    ], "Choose an option below." if userbot.logged_in() else
+       "Send <code>/login</code> to connect a user account so I can verify links "
+       "with Telegram directly.")
     return text, _kb([
         [Btn("📊 Status", callback_data="m:status"),
          Btn(f"📡 Channels · {pool}", callback_data="m:chs:0")],
@@ -233,8 +239,11 @@ def help_screen() -> Screen:
         "goes down, I swap the link in the post and notify you.</blockquote>\n"
         "<b>Commands</b>\n"
         "<code>/start</code>  Open this panel\n"
+        "<code>/login</code>  Connect a user account (reliable link checks)\n"
+        "<code>/logout</code>  Disconnect it\n"
         "<code>/load</code>  Add channels by link or id\n"
-        "<code>/preview</code>  Sample notifications"
+        "<code>/preview</code>  Sample notifications\n"
+        "<code>/cancel</code>  Stop what's in progress"
     )
     return text, _kb([_back()])
 

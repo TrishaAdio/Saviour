@@ -331,6 +331,7 @@ def status(channels: List[dict], post: Optional[dict], spread: bool,
         "<blockquote>" + "\n".join(items) + "</blockquote>\n"
         "<b>Redirect post</b>\n"
         f"<blockquote>{post_txt}</blockquote>\n"
+        f"<b>Verify</b>  {verify_method()}\n"
         f"<b>Last check</b>  {ago(last_check)}\n"
         f"<i>Mode {'spread' if spread else 'single'} · checks every "
         f"{plural(minutes, 'minute')}</i>"
@@ -343,3 +344,51 @@ def done(title: str, rows: Sequence[Row] = (), note: Optional[str] = None) -> st
 
 def problem(title: str, note: str) -> str:
     return card(WARN, title, (), note)
+
+
+# ------------------------------------------------------- user account
+def verify_method() -> str:
+    """One-line description of how links are being verified."""
+    import userbot
+    if userbot.logged_in():
+        return f"User account {esc(userbot.account())}"
+    return "Web check · <i>less reliable, /login to fix</i>"
+
+
+_LOGIN_ASK = {
+    "api_id": "Send your <b>api_id</b> (a number).",
+    "api_hash": "Send your <b>api_hash</b> (32 characters).",
+    "phone": "Send the account's <b>phone number</b> with country code, "
+             "e.g. <code>+919876543210</code>.",
+    "code": "Send the <b>login code</b> Telegram just sent.",
+    "password": "Send the account's <b>two-step verification password</b>.",
+}
+
+
+def login_intro(step: str) -> str:
+    rows = [("Why", "A bot can't ask Telegram if an invite link still works; a "
+                    "user account can")]
+    if step == "api_id":
+        rows.append(("Get keys", '<a href="https://my.telegram.org/apps">my.telegram.org'
+                                 "</a> → API development tools"))
+    return card(INFO, "Connect a user account", rows,
+                f"{_LOGIN_ASK[step]}\n\n"
+                "Use a spare account if you have one. I delete the api_hash, code "
+                "and password messages as they arrive, and the session is stored "
+                "with owner-only permissions. <code>/cancel</code> stops this.")
+
+
+def login_step(step: str, info: str) -> str:
+    return card(INFO, "Connect a user account", (), info or _LOGIN_ASK.get(step, ""))
+
+
+def login_done(name: str) -> str:
+    return card(OK, "User account connected", [
+        ("Account", esc(name)),
+        ("Link checks", "Verified with Telegram directly"),
+    ], "Every check now asks Telegram whether each invite link still works. "
+       "Use <code>/logout</code> to disconnect.")
+
+
+def login_failed(reason: str) -> str:
+    return card(WARN, "Login failed", (), f"{reason}\n\nSend <code>/login</code> to try again.")

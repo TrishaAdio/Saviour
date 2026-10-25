@@ -13,6 +13,7 @@ from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter, Time
 
 import config
 import template
+import userbot
 from storage import store
 
 log = logging.getLogger(__name__)
@@ -248,16 +249,35 @@ async def link_is_live(url: str) -> Optional[bool]:
     return "tgme_page_title" in resp.text
 
 
-async def confirm_dead(url: str) -> Optional[bool]:
-    """Re-check a link that looked dead, and make sure t.me itself is sane.
+async def link_state(url: str) -> Tuple[Optional[bool], str, str]:
+    """Is this link alive? Returns (live, source, detail).
 
-    Returns True only when the link failed twice *and* the control page loads
-    normally, so a t.me hiccup never gets a healthy channel dropped.
+    The logged-in user account is authoritative: Telegram itself answers
+    whether an invite is valid. Without it we fall back to reading t.me,
+    which is only a guess.
+    """
+    if userbot.logged_in():
+        verdict, detail = await userbot.check_link(url)
+        if verdict is not None:
+            return verdict, "userbot", detail
+        log.info("userbot couldn't judge %s (%s) - falling back to web check", url, detail)
+    live = await link_is_live(url)
+    return live, "web", "" if live else "t.me shows no channel"
+
+
+async def confirm_dead(url: str) -> Optional[bool]:
+    """Re-check a link that looked dead. True only when we're sure.
+
+    The user account speaks for Telegram, so one repeat is enough. The web
+    check also has to prove t.me itself is answering normally, otherwise a
+    t.me hiccup would drop a healthy channel.
     """
     await asyncio.sleep(3)
-    again = await link_is_live(url)
+    again, source, _ = await link_state(url)
     if again is not False:
         return None if again is None else False
+    if source == "userbot":
+        return True
     control = await link_is_live(CONTROL_URL)
     if control is not True:
         log.warning("t.me control page not normal (%s) - not trusting link checks now", control)
@@ -288,23 +308,26 @@ async def check_channel(bot: Bot, channel: Dict[str, Any]) -> Tuple[str, str]:
         return "unknown", "Telegram did not respond"
 
     # 2. The link as users see it
-    live = await link_is_live(channel["link"])
-    if live is not False:
-        return ("ok", "") if live else ("unknown", "Link check inconclusive")
-    confirmed = await confirm_dead(channel["link"])
-    if confirmed is None:
+    live, source, detail = await link_state(channel["link"])
+    if live is True:
+        return "ok", ""
+    if live is None:
+        return "unknown", "Link check inconclusive"
+    if await confirm_dead(channel["link"]) is None:
         return "unknown", "Link check inconclusive"
 
     # 3. Link is dead but the bot can still manage the channel: try a new link.
-    log.warning("link %s for %s is dead - creating a new one", channel["link"], cid)
+    log.warning("link %s for %s is dead (%s: %s) - creating a new one",
+                channel["link"], cid, source, detail)
     new_link, reason = await fetch_invite_link(bot, cid, channel.get("title") or "")
     if new_link and new_link != channel["link"]:
-        await asyncio.sleep(2)  # give t.me a moment to know the new invite
-        if await link_is_live(new_link) is True:
+        await asyncio.sleep(2)  # give Telegram a moment to know the new invite
+        fresh, _, _ = await link_state(new_link)
+        if fresh is True:
             channel["link"] = new_link
             await store.save()
-            return "relinked", "Old invite link stopped working"
-    return "dead", "Link no longer works for users (channel banned or deleted)"
+            return "relinked", detail or "Old invite link stopped working"
+    return "dead", detail or "Link no longer works for users"
 
 
 # ------------------------------------------------------- post rendering

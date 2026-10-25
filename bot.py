@@ -36,6 +36,7 @@ import config
 import core
 import menu
 import ui
+import userbot
 from storage import store
 
 logging.basicConfig(
@@ -59,6 +60,77 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_owner(update):
         return
     await send_screen(update, menu.home())
+
+
+async def cmd_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Start the user-account login used for reliable link checks."""
+    if not is_owner(update):
+        return
+    if not userbot.AVAILABLE:
+        await update.message.reply_text(
+            ui.problem("Telethon not installed",
+                       "Run <code>pip install -r requirements.txt</code> on the "
+                       "server and restart me."),
+            parse_mode=ParseMode.HTML)
+        return
+    if userbot.logged_in():
+        await update.message.reply_text(
+            ui.card(ui.OK, "Already signed in", [("Account", ui.esc(userbot.account()))],
+                    "Use <code>/logout</code> first if you want a different account."),
+            parse_mode=ParseMode.HTML)
+        return
+
+    session = userbot.Login()
+    context.user_data["login"] = session
+    context.user_data["awaiting_load"] = False
+    await update.message.reply_text(ui.login_intro(session.step), parse_mode=ParseMode.HTML)
+
+
+async def cmd_logout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_owner(update):
+        return
+    pending = context.user_data.pop("login", None)
+    if pending is not None:
+        await pending.close()
+    if not userbot.logged_in():
+        await update.message.reply_text(
+            ui.problem("Not signed in", "No user account is connected."),
+            parse_mode=ParseMode.HTML)
+        return
+    name = userbot.account()
+    clean = await userbot.logout()
+    await update.message.reply_text(
+        ui.card(ui.INFO, "Signed out", [("Account", ui.esc(name))],
+                ("Link checks fall back to reading t.me, which is less reliable."
+                 if clean else
+                 "The stored session was deleted, but Telegram didn't confirm the "
+                 "sign-out. Remove the session in Telegram → Devices to be sure.")),
+        parse_mode=ParseMode.HTML)
+
+
+async def handle_login_step(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                            message, session) -> None:
+    """Feed one message into the login flow, deleting secrets as they arrive."""
+    secret = session.step in ("api_hash", "code", "password")
+    text = message.text or ""
+    if secret:
+        try:
+            await context.bot.delete_message(message.chat_id, message.message_id)
+        except (BadRequest, Forbidden) as exc:
+            log.info("could not delete a login secret: %s", exc)
+
+    step, info = await session.feed(text)
+
+    if step == "done":
+        context.user_data.pop("login", None)
+        await message.reply_text(ui.login_done(info), parse_mode=ParseMode.HTML)
+        log.info("userbot signed in as %s", info)
+        return
+    if step == "failed":
+        context.user_data.pop("login", None)
+        await message.reply_text(ui.login_failed(info), parse_mode=ParseMode.HTML)
+        return
+    await message.reply_text(ui.login_step(step, info), parse_mode=ParseMode.HTML)
 
 
 async def cmd_load(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -150,6 +222,18 @@ async def cmd_active(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         ]),
         parse_mode=ParseMode.HTML, disable_web_page_preview=True,
     )
+
+
+async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_owner(update):
+        return
+    pending = context.user_data.pop("login", None)
+    if pending is not None:
+        await pending.close()
+    context.user_data["awaiting_load"] = False
+    await update.message.reply_text(
+        ui.done("Cancelled", (), "Nothing in progress. Send /start for the panel."),
+        parse_mode=ParseMode.HTML)
 
 
 async def cmd_preview(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -360,6 +444,13 @@ async def on_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
     message = update.effective_message
     if message is None:  # edited/odd update slipped through
         return
+
+    # A /login flow in progress takes every message until it finishes.
+    session = context.user_data.get("login")
+    if session is not None:
+        await handle_login_step(update, context, message, session)
+        return
+
     expecting = context.user_data.get("awaiting_load") or store.awaiting_links
     text = message.text or message.caption or ""
 
@@ -635,6 +726,10 @@ async def on_startup(app: Application) -> None:
         log.warning("startup DM timed out, carrying on: %s", exc)
 
 
+async def on_shutdown(app: Application) -> None:
+    await userbot.disconnect()
+
+
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Log anything unhandled and tell the owner instead of dying silently."""
     err = context.error
@@ -678,6 +773,7 @@ def main() -> None:
         .get_updates_write_timeout(timeout)
         .get_updates_pool_timeout(timeout)
         .post_init(on_startup)
+        .post_shutdown(on_shutdown)
         .build()
     )
 
@@ -688,6 +784,9 @@ def main() -> None:
     app.add_handler(CommandHandler("start", cmd_start, private))
     app.add_handler(CommandHandler("help", cmd_start, private))
     app.add_handler(CommandHandler("load", cmd_load, private))
+    app.add_handler(CommandHandler("login", cmd_login, private))
+    app.add_handler(CommandHandler("logout", cmd_logout, private))
+    app.add_handler(CommandHandler("cancel", cmd_cancel, private))
     app.add_handler(CommandHandler("status", cmd_status, private))
     app.add_handler(CommandHandler("refresh", cmd_refresh, private))
     app.add_handler(CommandHandler("remove", cmd_remove, private))

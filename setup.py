@@ -195,6 +195,17 @@ def configure() -> dict:
                             current.get("POST_TITLE", "none"))
     cfg["CHECK_INTERVAL"] = str(ask("Health-check interval in seconds",
                                     current.get("CHECK_INTERVAL", "300"), cast=int))
+
+    print(f"{D}      A user account makes link checks reliable (a bot can't ask"
+          f" Telegram{X}")
+    print(f"{D}      whether an invite still works). Keys: my.telegram.org → API"
+          f" development tools.{X}")
+    print(f"{D}      Optional - press Enter to skip and use /login in Telegram"
+          f" later.{X}")
+    api_id = ask("api_id (optional)", current.get("API_ID", "skip"))
+    if api_id.isdigit():
+        cfg["API_ID"] = api_id
+        cfg["API_HASH"] = ask("api_hash", current.get("API_HASH"))
     print(f"{D}      link mode: 'single' = all lines show the active channel"
           f" (like your screenshot){X}")
     print(f"{D}                 'spread' = rotate lines across every loaded channel{X}")
