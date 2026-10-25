@@ -1,6 +1,9 @@
 .env
 data.json
 data.json.tmp
+session.json
+session.json.tmp
+*.session
 bot.log
 __pycache__/
 *.pyc

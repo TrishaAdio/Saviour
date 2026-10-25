@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import time
 from typing import Any, Dict, List, Optional
 
 import config
@@ -62,15 +63,46 @@ class Storage:
         """Returns True when newly added, False when it was only refreshed."""
         existing = self.get_channel(chat_id)
         if existing:
-            existing.update(title=title, username=username, link=link)
+            existing.update(title=title, username=username, link=link,
+                            offline=False, strikes=0)
+            existing.pop("offline_since", None)
+            existing.pop("reason", None)
             return False
         self.channels.append(
-            {"id": chat_id, "title": title, "username": username, "link": link}
+            {"id": chat_id, "title": title, "username": username, "link": link,
+             "offline": False, "strikes": 0}
         )
         return True
 
     def remove_channel(self, chat_id: int) -> None:
         self.data["channels"] = [c for c in self.channels if c["id"] != chat_id]
+
+    # --------------------------------------------- online / offline
+    # A channel is never deleted just because a check failed: it is parked
+    # as "offline", kept in the file and re-checked every round, so a wrong
+    # verdict repairs itself and the pool can't be burned through.
+    def online(self) -> List[Dict[str, Any]]:
+        return [c for c in self.channels if not c.get("offline")]
+
+    def offline(self) -> List[Dict[str, Any]]:
+        return [c for c in self.channels if c.get("offline")]
+
+    def park_offline(self, chat_id: int, reason: str) -> None:
+        channel = self.get_channel(chat_id)
+        if channel is None:
+            return
+        channel["offline"] = True
+        channel["reason"] = reason
+        channel.setdefault("offline_since", int(time.time()))
+
+    def bring_online(self, chat_id: int) -> None:
+        channel = self.get_channel(chat_id)
+        if channel is None:
+            return
+        channel["offline"] = False
+        channel["strikes"] = 0
+        channel.pop("offline_since", None)
+        channel.pop("reason", None)
 
     # ------------------------------------------------------------- post
     @property

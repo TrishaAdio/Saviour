@@ -38,6 +38,24 @@ CHECK_INTERVAL = _int("CHECK_INTERVAL", 300)
 # Seconds to wait for Telegram before a request counts as timed out.
 HTTP_TIMEOUT = _int("HTTP_TIMEOUT", 20)
 
+# Optional user account used to verify links (see /login). If these are set
+# here, /login only asks for the phone number and code.
+API_ID = _int("API_ID", 0)
+API_HASH = (os.getenv("API_HASH") or "").strip()
+
+# Only monitor once a user account is connected. The web check alone produces
+# false alarms, which burn through the link pool, so it never declares a
+# channel dead - it can only confirm one is alive.
+REQUIRE_USERBOT = _bool("REQUIRE_USERBOT", True)
+
+# How many checks in a row, each CHECK_INTERVAL apart, must agree a channel is
+# dead before it is parked offline. One bad answer is never enough.
+DEATH_STRIKES = max(_int("DEATH_STRIKES", 3), 1)
+
+# Minimum seconds between two requests made by the user account. Keeps the
+# account well inside Telegram's limits.
+MIN_REQUEST_GAP = max(_int("MIN_REQUEST_GAP", 3), 1)
+
 # Optional bold line above the links, used only for a plain ".set" (a reply
 # ".set" copies the original post exactly). "none" or empty = no title line,
 # which matches a post that is just the quote box of links.

@@ -53,7 +53,8 @@ def _spread() -> bool:
 
 # ---------------------------------------------------------------- home
 def home() -> Screen:
-    pool = len(store.channels)
+    pool = len(store.online())
+    parked = len(store.offline())
     post = store.post
     if pool == 0:
         dot, health = ui.CRIT, "No live links"
@@ -64,12 +65,21 @@ def home() -> Screen:
     else:
         dot, health = ui.OK, "Protected"
 
-    text = ui.card(dot, "Saviour control panel", [
+    import userbot
+    if not userbot.logged_in() and dot == ui.OK:
+        dot, health = ui.WARN, "Link checks unverified"
+    rows = [
         ("Health", health),
-        ("Channels", ui.pool_value(pool)),
+        ("Channels", ui.pool_value(pool) + (f" · {parked} offline" if parked else "")),
         ("Post", "Monitored" if post else "Not linked"),
+        ("Verify", ui.verify_method()),
         ("Last check", ui.ago(store.data.get("last_check"))),
-    ], "Choose an option below.")
+    ]
+    text = ui.card(dot, "Saviour control panel", rows,
+                   "Choose an option below." if userbot.logged_in() else
+                   "<b>Monitoring is paused.</b> Send <code>/login</code> to connect "
+                   "a user account — without it I can't tell a live channel from a "
+                   "dead one, so I won't guess.")
     return text, _kb([
         [Btn("📊 Status", callback_data="m:status"),
          Btn(f"📡 Channels · {pool}", callback_data="m:chs:0")],
@@ -105,16 +115,20 @@ def channels(page: int = 0) -> Screen:
 
     note = "Tap a channel to manage it."
     if not _spread():
-        note = "⭐ marks the channel shown in the post. " + note
-    rows = [("Pool", ui.pool_value(len(chans)))]
+        note = "⭐ shown in the post · ⚠️ offline. " + note
+    rows = [("Working", ui.pool_value(len(store.online())))]
+    if store.offline():
+        rows.append(("Offline", f"{len(store.offline())} · re-checked every round"))
     if pages > 1:
         rows.append(("Page", f"{page + 1} of {pages}"))
     text = ui.card(ui.INFO, "Channels", rows, note)
 
+    online = store.online()
+    active_id = online[0]["id"] if online and not _spread() else None
     buttons = []
-    for i, ch in enumerate(chunk, start=start):
-        star = "⭐ " if i == 0 and not _spread() else ""
-        buttons.append([Btn(f"{star}{_short(ch['title'])}", callback_data=f"m:ch:{ch['id']}")])
+    for ch in chunk:
+        mark = "⚠️ " if ch.get("offline") else ("⭐ " if ch["id"] == active_id else "")
+        buttons.append([Btn(f"{mark}{_short(ch['title'])}", callback_data=f"m:ch:{ch['id']}")])
     nav = []
     if page > 0:
         nav.append(Btn("‹ Prev", callback_data=f"m:chs:{page - 1}"))
@@ -131,16 +145,35 @@ def channel(chat_id: int) -> Optional[Screen]:
     if not ch:
         return None
     index = store.channels.index(ch)
-    active = index == 0 and not _spread()
-    role = "Shown in the post" if active else ("In rotation" if _spread() else "Backup")
-    text = ui.card(ui.INFO, ch["title"], [
+    online = store.online()
+    parked = bool(ch.get("offline"))
+    active = (not parked and not _spread() and online and online[0]["id"] == chat_id)
+    if parked:
+        role = "Offline · not used in the post"
+    elif active:
+        role = "Shown in the post"
+    else:
+        role = "In rotation" if _spread() else "Backup"
+
+    details = [
         ("ID", ui.code(ch["id"])),
         ("Invite", ui.link(ch["link"])),
         ("Role", role),
-        ("Position", f"{index + 1} of {len(store.channels)}"),
-    ])
+    ]
+    if parked:
+        details.append(("Reason", ui.esc(ch.get("reason", "unknown"))))
+        details.append(("Since", ui.ago(ch.get("offline_since"))))
+    elif ch.get("strikes"):
+        details.append(("Warning", f"failed {ch['strikes']} of "
+                                   f"{config.DEATH_STRIKES} checks"))
+    text = ui.card(ui.WARN if parked else ui.INFO, ch["title"], details,
+                   "I keep re-checking it; if it answers again it comes back by "
+                   "itself." if parked else None)
+
     rows = []
-    if not active and not _spread():
+    if parked:
+        rows.append([Btn("✅ Use it anyway", callback_data=f"m:act:{chat_id}")])
+    elif not active and not _spread():
         rows.append([Btn("⭐ Make active", callback_data=f"m:act:{chat_id}")])
     rows.append([Btn("🗑 Remove", callback_data=f"m:rm:{chat_id}")])
     rows.append(_back(f"m:chs:{index // PAGE_SIZE}", "‹ Channels"))
@@ -233,8 +266,12 @@ def help_screen() -> Screen:
         "goes down, I swap the link in the post and notify you.</blockquote>\n"
         "<b>Commands</b>\n"
         "<code>/start</code>  Open this panel\n"
+        "<code>/login</code>  Connect a user account (reliable link checks)\n"
+        "<code>/logout</code>  Disconnect it\n"
+        "<code>/scan</code>  Check every channel now\n"
         "<code>/load</code>  Add channels by link or id\n"
-        "<code>/preview</code>  Sample notifications"
+        "<code>/preview</code>  Sample notifications\n"
+        "<code>/cancel</code>  Stop what's in progress"
     )
     return text, _kb([_back()])
 
