@@ -9,7 +9,9 @@ any message at a glance:
     ┃ Pool      3 active
     The redirect post now uses it.  <- one line: what happens / what to do
 
-Severity: 🟢 done · 🔵 info · 🟠 needs attention · 🔴 critical.
+Severity is an icon: check = done, info = information, exclamation = needs
+attention, cross = critical. Every icon comes from ``icons`` and degrades to
+the old coloured dots (and plain row labels) when Premium icons are off.
 """
 
 import html
@@ -17,10 +19,19 @@ import time
 from typing import Iterable, List, Optional, Sequence, Tuple
 
 import config
+import icons
 
-OK, INFO, WARN, CRIT = "🟢", "🔵", "🟠", "🔴"
+# Severity names; ``dot()`` turns one into its icon.
+OK, INFO, WARN, CRIT = "ok", "info", "warn", "crit"
 
 Row = Tuple[str, str]
+
+STATUS_LIST_MAX = 10   # keeps a message under Telegram's 100-entity limit
+SCAN_LIST_MAX = 30
+
+
+def dot(severity: str) -> str:
+    return icons.tg(severity)
 
 
 def esc(value) -> str:
@@ -38,12 +49,12 @@ def link(url: str) -> str:
     return f'<a href="{html.escape(url, quote=True)}">{esc(shown)}</a>'
 
 
-def card(dot: str, title: str, rows: Sequence[Row] = (),
+def card(severity: str, title: str, rows: Sequence[Row] = (),
          note: Optional[str] = None, items: Iterable[str] = ()) -> str:
     """Render a notification card. ``rows`` values must already be HTML-safe."""
-    parts: List[str] = [f"{dot} <b>{esc(title)}</b>"]
+    parts: List[str] = [f"{icons.tg(severity)} <b>{esc(title)}</b>"]
     body = list(items)  # bullet list first, then the label rows
-    body += [f"<b>{esc(label)}</b>  {value}" for label, value in rows]
+    body += [f"{icons.row(label)}<b>{esc(label)}</b>  {value}" for label, value in rows]
     if body:
         parts.append("<blockquote>" + "\n".join(body) + "</blockquote>")
     if note:
@@ -293,10 +304,11 @@ def private_invites_unsupported() -> str:
 
 def load_result(added, refreshed, failed, unresolvable, pool, post_line: Optional[str]) -> str:
     ok = bool(added or refreshed)
-    items = [f"✓ <b>{esc(n)}</b>" for n in added]
-    items += [f"↻ <b>{esc(n)}</b> · link refreshed" for n in refreshed]
-    items += [f"✕ <code>{esc(t)}</code> · {esc(r)}" for t, r in failed]
-    items += [f"✕ <code>{esc(l)}</code> · forward a post instead" for l in unresolvable]
+    items = [f"{icons.tg('good')} <b>{esc(n)}</b>" for n in added]
+    items += [f"{icons.tg('retry')} <b>{esc(n)}</b> · link refreshed" for n in refreshed]
+    items += [f"{icons.tg('bad')} <code>{esc(t)}</code> · {esc(r)}" for t, r in failed]
+    items += [f"{icons.tg('bad')} <code>{esc(l)}</code> · forward a post instead"
+              for l in unresolvable]
     rows: List[Row] = [("Pool", pool_value(pool))]
     if post_line:
         rows.append(("Post", post_line))
@@ -323,13 +335,16 @@ def status(channels: List[dict], post: Optional[dict], spread: bool,
     working = [c for c in channels if not c.get("offline")]
     parked = [c for c in channels if c.get("offline")]
     items = []
-    for i, ch in enumerate(working):
-        star = "  ⭐" if i == 0 and not spread else ""
+    for i, ch in enumerate(working[:STATUS_LIST_MAX]):
+        star = f"  {icons.tg('active')}" if i == 0 and not spread else ""
         items.append(f"• <b>{esc(ch['title'])}</b>{star}\n   {code(ch['id'])} · {link(ch['link'])}")
+    if len(working) > STATUS_LIST_MAX:
+        items.append(f"<i>… and {len(working) - STATUS_LIST_MAX} more working "
+                     "(see Channels)</i>")
     if not items:
         items.append("<i>No working channels</i>")
-    for ch in parked:
-        items.append(f"⚠️ <b>{esc(ch['title'])}</b> · offline\n"
+    for ch in parked[:STATUS_LIST_MAX]:
+        items.append(f"{icons.tg('offline')} <b>{esc(ch['title'])}</b> · offline\n"
                      f"   {code(ch['id'])} · {esc(ch.get('reason', 'unknown'))}")
     channels = working
     if post:
@@ -340,13 +355,13 @@ def status(channels: List[dict], post: Optional[dict], spread: bool,
         post_txt = "<i>Not set</i>"
     minutes = max(config.CHECK_INTERVAL // 60, 1)
     return (
-        f"{INFO} <b>Status</b>\n"
-        f"<b>Channels</b> · {pool_value(len(channels))}\n"
+        f"{dot(INFO)} <b>Status</b>\n"
+        f"{icons.row('Channels')}<b>Channels</b> · {pool_value(len(channels))}\n"
         "<blockquote>" + "\n".join(items) + "</blockquote>\n"
-        "<b>Redirect post</b>\n"
+        f"{icons.row('Post')}<b>Redirect post</b>\n"
         f"<blockquote>{post_txt}</blockquote>\n"
-        f"<b>Verify</b>  {verify_method()}\n"
-        f"<b>Last check</b>  {ago(last_check)}\n"
+        f"{icons.row('Verify')}<b>Verify</b>  {verify_method()}\n"
+        f"{icons.row('Last check')}<b>Last check</b>  {ago(last_check)}\n"
         f"<i>Mode {'spread' if spread else 'single'} · checks every "
         f"{plural(minutes, 'minute')}</i>"
     )
@@ -440,10 +455,10 @@ def channel_recovered(channel: dict, post_result: str) -> str:
 
 def scan_report(results: List[Tuple[dict, str, str]], post_result: str) -> str:
     """results: (channel, state, reason) for every channel, after a full scan."""
-    label = {"ok": "✓", "relinked": "↻", "suspect": "✕", "unknown": "?"}
+    label = {"ok": "good", "relinked": "retry", "suspect": "bad", "unknown": "unknown"}
     items = []
-    for channel, state, reason in results:
-        line = f"{label.get(state, '?')} <b>{esc(channel['title'])}</b>"
+    for channel, state, reason in results[:SCAN_LIST_MAX]:
+        line = f"{icons.tg(label.get(state, 'unknown'))} <b>{esc(channel['title'])}</b>"
         if state == "relinked":
             line += " · new invite link created"
         elif state == "suspect":
@@ -451,6 +466,8 @@ def scan_report(results: List[Tuple[dict, str, str]], post_result: str) -> str:
         elif state == "unknown":
             line += f" · couldn't verify ({esc(reason)})"
         items.append(line)
+    if len(results) > SCAN_LIST_MAX:
+        items.append(f"<i>… and {len(results) - SCAN_LIST_MAX} more</i>")
     working = sum(1 for _, s, _ in results if s in ("ok", "relinked"))
     bad = sum(1 for _, s, _ in results if s == "suspect")
     rows = [("Working", f"{working} of {len(results)}")]
@@ -460,7 +477,8 @@ def scan_report(results: List[Tuple[dict, str, str]], post_result: str) -> str:
         rows.append(("Post", post_status(post_result)))
     note = None
     if bad:
-        note = ("Channels marked ✕ are kept and re-checked; they're only taken "
+        note = (f"Channels marked {icons.tg('bad')} are kept and re-checked; "
+                "they're only taken "
                 "out of the post after repeated failures.")
     return card(OK if working else WARN, "Scan complete", rows, note, items)
 
@@ -476,3 +494,20 @@ def duplicate_instance() -> str:
        "<code>systemctl stop saviour</code>\n"
        "<code>screen -S saviour -X quit</code></blockquote>"
        "Then start <b>one</b> copy. Newer versions refuse to start a second one.")
+
+
+# ---------------------------------------------------------- premium icons
+def icons_status() -> str:
+    on = icons.enabled()
+    return card(OK if on else INFO, "Premium icons", [
+        ("Status", icons.state_text()),
+        ("Pack", "tgmacicons"),
+    ], "Icons need the bot owner to have Telegram Premium. "
+       "<code>/icons on</code> or <code>/icons off</code> changes this.")
+
+
+def icons_off() -> str:
+    return card(INFO, "Premium icons turned off", [
+        ("Reason", esc(icons.store.data.get("icons_reason", "Telegram did not show them"))),
+    ], "Messages and buttons use standard emoji instead; nothing else changed. "
+       "After getting Telegram Premium, send <code>/icons on</code>.")

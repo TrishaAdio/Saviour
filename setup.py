@@ -211,6 +211,12 @@ def configure() -> dict:
     print(f"{D}                 'spread' = rotate lines across every loaded channel{X}")
     mode = ask("Link mode (single/spread)", current.get("LINK_MODE", "single")).lower()
     cfg["LINK_MODE"] = mode if mode in ("single", "spread") else "single"
+    print(f"{D}      Premium icons need the bot OWNER to have Telegram Premium. If"
+          f" they don't show,{X}")
+    print(f"{D}      the bot switches them off by itself (or use /icons off).{X}")
+    icons_on = ask("Use Premium icons? (y/n)",
+                   "n" if current.get("CUSTOM_EMOJI", "true") == "false" else "y").lower()
+    cfg["CUSTOM_EMOJI"] = "true" if icons_on.startswith("y") else "false"
     cfg["EXPANDABLE_QUOTE"] = current.get("EXPANDABLE_QUOTE", "false")
     cfg["MIN_CHANNELS"] = current.get("MIN_CHANNELS", "1")
 

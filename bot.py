@@ -24,6 +24,7 @@ from typing import Optional
 from telegram import Update
 from telegram.constants import ChatMemberStatus, ParseMode
 from telegram.error import BadRequest, Conflict, Forbidden
+from telegram.request import HTTPXRequest
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -36,9 +37,11 @@ from telegram.ext import (
 
 import config
 import core
+import icons
 import menu
 import ui
 import userbot
+from safebot import SafeBot
 from storage import store
 
 logging.basicConfig(
@@ -233,7 +236,7 @@ async def run_scan(context: ContextTypes.DEFAULT_TYPE, message) -> None:
     """Check every channel once and report. Nothing is parked from one scan."""
     channels = list(store.channels)
     note = await message.reply_text(
-        f"{ui.INFO} <b>Scanning {ui.plural(len(channels), 'channel')}…</b>",
+        f"{ui.dot(ui.INFO)} <b>Scanning {ui.plural(len(channels), 'channel')}…</b>",
         parse_mode=ParseMode.HTML)
 
     results = []
@@ -278,6 +281,31 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(ui.monitoring_paused(), parse_mode=ParseMode.HTML)
         return
     await run_scan(context, update.message)
+
+
+async def cmd_icons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show, or switch, the Premium icons (they need the owner to have Premium)."""
+    if not is_owner(update):
+        return
+    arg = (context.args[0].lower() if context.args else "")
+    if arg in ("on", "off"):
+        icons.set_override(arg == "on")
+        await store.save()
+    elif arg:
+        await update.message.reply_text(
+            ui.problem("Unknown option", "Use <code>/icons on</code>, "
+                       "<code>/icons off</code> or just <code>/icons</code>."),
+            parse_mode=ParseMode.HTML)
+        return
+
+    sent = await update.message.reply_text(ui.icons_status(), parse_mode=ParseMode.HTML)
+    # Turning icons on is a test: if Telegram strips them from this very
+    # message, the owner has no Premium - say so now instead of silently.
+    if arg == "on" and icons.enabled() and not icons.delivered(sent):
+        icons._switch_off("Telegram is not showing custom icons "
+                          "(the bot owner needs Telegram Premium)")
+        await store.save()
+        await update.message.reply_text(ui.icons_off(), parse_mode=ParseMode.HTML)
 
 
 async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -527,7 +555,7 @@ async def on_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     status = await message.reply_text(
-        f"{ui.INFO} <b>Verifying {ui.plural(len(targets), 'channel')}…</b>",
+        f"{ui.dot(ui.INFO)} <b>Verifying {ui.plural(len(targets), 'channel')}…</b>",
         parse_mode=ParseMode.HTML,
     )
     added, refreshed, failed = [], [], []
@@ -908,17 +936,16 @@ def main() -> None:
     # PTB's default HTTP timeouts are 5s, which a busy VPS link regularly
     # exceeds (that was the TimedOut in the health check). Give Telegram room.
     timeout = config.HTTP_TIMEOUT
+    limits = dict(connect_timeout=timeout, read_timeout=timeout,
+                  write_timeout=timeout, pool_timeout=timeout)
+    bot = SafeBot(
+        config.BOT_TOKEN,
+        request=HTTPXRequest(connection_pool_size=16, **limits),
+        get_updates_request=HTTPXRequest(connection_pool_size=1, **limits),
+    )
     app = (
         Application.builder()
-        .token(config.BOT_TOKEN)
-        .connect_timeout(timeout)
-        .read_timeout(timeout)
-        .write_timeout(timeout)
-        .pool_timeout(timeout)
-        .get_updates_connect_timeout(timeout)
-        .get_updates_read_timeout(timeout)
-        .get_updates_write_timeout(timeout)
-        .get_updates_pool_timeout(timeout)
+        .bot(bot)
         .post_init(on_startup)
         .post_shutdown(on_shutdown)
         .build()
@@ -935,6 +962,7 @@ def main() -> None:
     app.add_handler(CommandHandler("logout", cmd_logout, private))
     app.add_handler(CommandHandler("cancel", cmd_cancel, private))
     app.add_handler(CommandHandler("scan", cmd_scan, private))
+    app.add_handler(CommandHandler("icons", cmd_icons, private))
     app.add_handler(CommandHandler("status", cmd_status, private))
     app.add_handler(CommandHandler("refresh", cmd_refresh, private))
     app.add_handler(CommandHandler("remove", cmd_remove, private))
