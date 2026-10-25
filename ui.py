@@ -463,3 +463,16 @@ def scan_report(results: List[Tuple[dict, str, str]], post_result: str) -> str:
         note = ("Channels marked ✕ are kept and re-checked; they're only taken "
                 "out of the post after repeated failures.")
     return card(OK if working else WARN, "Scan complete", rows, note, items)
+
+
+def duplicate_instance() -> str:
+    return card(CRIT, "Two copies of the bot are running", [
+        ("Telegram", code("Conflict: terminated by other getUpdates request")),
+        ("Effect", "Updates go to whichever copy asks first"),
+    ], "Checks and buttons will behave unpredictably until one is stopped. On the "
+       "server:\n"
+       "<blockquote><code>pgrep -af bot.py</code>\n"
+       "<code>pkill -f bot.py</code>\n"
+       "<code>systemctl stop saviour</code>\n"
+       "<code>screen -S saviour -X quit</code></blockquote>"
+       "Then start <b>one</b> copy. Newer versions refuse to start a second one.")

@@ -13,15 +13,17 @@ Flow
 5. Out of links -> it DMs the owner asking for new ones.
 """
 
+import fcntl
 import html as _html
 import logging
+import os
 import re
 import time
 from typing import Optional
 
 from telegram import Update
 from telegram.constants import ChatMemberStatus, ParseMode
-from telegram.error import BadRequest, Forbidden
+from telegram.error import BadRequest, Conflict, Forbidden
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -833,6 +835,16 @@ async def on_shutdown(app: Application) -> None:
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Log anything unhandled and tell the owner instead of dying silently."""
     err = context.error
+
+    # Two copies of the bot are polling Telegram. It repeats for every poll,
+    # so report it once with instructions instead of flooding the chat.
+    if isinstance(err, Conflict):
+        log.error("another bot instance is polling: %s", err)
+        if not context.application.bot_data.get("conflict_reported"):
+            context.application.bot_data["conflict_reported"] = True
+            await notify_owner(context, ui.duplicate_instance())
+        return
+
     if core.is_transient(err):
         # A slow or dropped connection to Telegram. Not a bug and nothing the
         # owner can act on - one log line, no traceback, no DM.
@@ -852,11 +864,46 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         log.exception("could not report the error to the owner")
 
 
+_instance_lock = None
+
+
+def claim_single_instance() -> None:
+    """Refuse to start if another copy of the bot is already running.
+
+    Two running copies fight over getUpdates and Telegram answers both with
+    "Conflict: terminated by other getUpdates request", so neither works
+    properly. A lock file held for the life of the process makes that
+    impossible: the second copy exits immediately with a clear message.
+    """
+    global _instance_lock
+    path = config.BASE_DIR / "bot.lock"
+    _instance_lock = open(path, "a+")
+    try:
+        fcntl.flock(_instance_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        _instance_lock.seek(0)
+        other = (_instance_lock.read() or "").strip() or "unknown"
+        raise SystemExit(
+            f"Another copy of the bot is already running (PID {other}).\n"
+            "Running two copies breaks both, so this one is stopping.\n\n"
+            "To see what is running:   pgrep -af 'bot.py'\n"
+            "Stop everything:          pkill -f 'bot.py'; systemctl stop saviour "
+            "2>/dev/null; screen -S saviour -X quit 2>/dev/null\n"
+            "Then start exactly one."
+        )
+    _instance_lock.seek(0)
+    _instance_lock.truncate()
+    _instance_lock.write(str(os.getpid()))
+    _instance_lock.flush()
+    log.info("instance lock held (PID %s)", os.getpid())
+
+
 def main() -> None:
     if not config.BOT_TOKEN:
         raise SystemExit("BOT_TOKEN missing — run: python3 setup.py")
     if not config.OWNER_ID:
         raise SystemExit("OWNER_ID missing — run: python3 setup.py")
+    claim_single_instance()
 
     # PTB's default HTTP timeouts are 5s, which a busy VPS link regularly
     # exceeds (that was the TimedOut in the health check). Give Telegram room.

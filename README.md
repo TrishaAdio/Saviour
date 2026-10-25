@@ -138,6 +138,22 @@ systemctl status saviour        # should say "active (running)"
 `/start` shows **Last check** — if that's more than a few minutes old, the bot
 isn't running.
 
+### Run exactly one copy
+
+Two copies polling Telegram get `Conflict: terminated by other getUpdates
+request` and both misbehave. That usually means systemd *and* a screen session
+are both running it. The bot now refuses to start a second copy, but to clean up
+an existing mess:
+
+```bash
+pgrep -af bot.py                      # what's running
+pkill -f bot.py                       # stop all copies
+systemctl stop saviour 2>/dev/null    # stop the service if it exists
+screen -S saviour -X quit 2>/dev/null # stop the screen session
+```
+
+Then start **one**. Pick systemd *or* screen, not both.
+
 ## Usage
 
 1. **Add the bot as admin** to each backup channel — it needs *Invite Users via Link*.
