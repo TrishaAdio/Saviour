@@ -577,3 +577,8 @@ def sync_report(r: dict) -> str:
     title = ("Channels connected" if added else
              "Nothing new to connect" if not (need or failed) else "Sync needs attention")
     return card(severity, title, rows, "\n".join(notes), items)
+
+
+def banner(text: str, bad: bool = False) -> str:
+    """Result of a panel action, shown as the first line of the redrawn panel."""
+    return f"{icons.tg('warn' if bad else 'good')} <i>{esc(text)}</i>\n\n"

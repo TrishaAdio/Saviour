@@ -499,18 +499,49 @@ async def _sync_into_panel(context: ContextTypes.DEFAULT_TYPE, query) -> None:
             log.warning("could not show the sync result: %s", exc)
 
 
+_STALE = ("query is too old", "query id is invalid", "response timeout expired")
+
+
+async def answer_press(query) -> bool:
+    """Acknowledge a button press. False means it's stale and must be ignored."""
+    try:
+        await query.answer()
+        return True
+    except BadRequest as exc:
+        if any(m in (exc.message or "").lower() for m in _STALE):
+            log.info("ignoring a stale button press (%s): %s", query.data, exc.message)
+            return False
+        log.warning("could not acknowledge button %s: %s", query.data, exc)
+        return True
+    except core.TRANSIENT as exc:
+        # The network hiccuped; the press itself is current, so carry on.
+        log.warning("acknowledging button %s timed out: %s", query.data, exc)
+        return True
+
+
 async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Every panel button lands here and edits the same message in place."""
     query = update.callback_query
     if query is None or not query.data:
         return
     if not is_owner(update):
-        await query.answer("This panel is only for the bot owner.", show_alert=True)
+        try:
+            await query.answer("This panel is only for the bot owner.", show_alert=True)
+        except (BadRequest, *core.TRANSIENT):
+            pass
+        return
+
+    # Answer FIRST, before doing anything. Telegram rejects an answer to a press
+    # that is too old - which happens when presses queued while the bot was down
+    # are replayed on start. Such a press must not run: it could be a stale
+    # "Remove" or "Stop monitoring". So a rejected answer means: do nothing.
+    if not await answer_press(query):
         return
 
     _, action, *rest = query.data.split(":") + [""]
     arg = rest[0] if rest else ""
-    toast = None
+    toast = None          # result line shown at the top of the redrawn panel
+    toast_bad = False
     screen = None
 
     def channel_id() -> Optional[int]:
@@ -530,7 +561,8 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         screen = (menu.channel(cid) if action == "ch" else menu.confirm_remove(cid)) \
             if cid is not None else None
         if screen is None:
-            toast, screen = "That channel is no longer connected.", menu.channels(0)
+            toast, toast_bad = "That channel is no longer connected.", True
+            screen = menu.channels(0)
     elif action == "act":
         cid = channel_id()
         ch = store.get_channel(cid) if cid is not None else None
@@ -546,7 +578,8 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             toast = f"{lead}: {ch['title']}. Post: {_plain(ui.post_status(result))}"
             screen = menu.channel(cid)
         else:
-            toast, screen = "That channel is no longer connected.", menu.channels(0)
+            toast, toast_bad = "That channel is no longer connected.", True
+            screen = menu.channels(0)
     elif action == "rmok":
         cid = channel_id()
         ch = store.get_channel(cid) if cid is not None else None
@@ -580,9 +613,8 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         context.user_data["awaiting_load"] = True
         screen = menu.add()
     elif action == "sync":
-        # Long-running: answer now, show "searching", and let a background task
-        # edit this same message when it has the result.
-        await query.answer("Searching for channels…")
+        # Long-running: show "searching" now, and let a background task edit
+        # this same message when it has the result.
         text, keyboard = menu.sync_running()
         try:
             await query.edit_message_text(text, parse_mode=ParseMode.HTML,
@@ -595,7 +627,6 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     elif action == "help":
         screen = menu.help_screen()
     elif action == "close":
-        await query.answer()
         try:
             await query.edit_message_text(menu.closed(), parse_mode=ParseMode.HTML)
         except BadRequest:
@@ -604,12 +635,9 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     else:
         screen = menu.home()
 
-    try:
-        await query.answer(toast)
-    except (BadRequest, core.TRANSIENT) as exc:  # answering late is harmless
-        log.info("callback answer skipped: %s", exc)
-
     text, keyboard = screen
+    if toast:
+        text = ui.banner(toast, bad=toast_bad) + text
     try:
         await core.with_retry(
             query.edit_message_text, text, parse_mode=ParseMode.HTML,
