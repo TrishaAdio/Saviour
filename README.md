@@ -29,7 +29,7 @@ python3 saviour.py        # or venv/bin/python3 saviour.py
 
 ### 1. Adding a backup channel
 Add the account, promote it to admin. It needs **Invite Users via Link**;
-give it **Change Info** too so it can keep the bio fresh. The moment you
+give it **Change Info** too, so it can test the channel before it fills the post. The moment you
 promote it:
 
 ```
@@ -74,29 +74,38 @@ https://t.me/+pbib86sOwyU1NjRh
 Every line shows the channel that is currently live. When it dies, the **same
 post is edited** to show the next one — never reposted.
 
-### 3. Random bios, and links that fix themselves
-Every `CHECK_EVERY` seconds (default 300), for each channel:
+### 3. Quiet checks
+Every `CHECK_EVERY` seconds (default 300), or when you send **`.check`**, each
+channel is checked **read-only**:
 
-1. open it and confirm we're still admin
-2. **write a new random line into its bio** — the channel keeps looking
-   active, and it proves we can still act in there
-3. ask Telegram directly whether the invite link still works
+1. open it and confirm it's still admin
+2. ask Telegram directly whether the invite link still works
 
-If the **bio can't be written**, the channel gets a **brand new invite link**.
-If the **link itself is dead** but the channel is fine, the old invite was
-revoked — so a fresh one is made and *verified* before it's used.
+Healthy channels are **never edited**. Constant bio and name changes for no
+reason are what get channels flagged and deleted. If a link is dead but the
+channel is fine, a fresh invite is made and *verified* before it's used.
 
 ### 4. The "." test — settled on the spot
-When a check fails (Telegram won't open the channel, the bio can't be written,
-the link can't be renewed), the account doesn't wait for more rounds. It
-**posts a `.` in the channel right away**:
+When a check fails, the account doesn't wait for more rounds. It **posts a
+`.` in the channel right away**:
 
 - **it posts** → deleted again at once. The channel is alive and it was a false alarm.
-- **Telegram refuses it, for any reason** → the channel is treated as deleted.
-  It leaves the post **immediately** and you get *🔴 Channel deleted — removed
-  from the post*.
+- **Telegram refuses it, for any reason** → the channel is treated as deleted
+  and leaves the post **immediately**.
 - **Telegram doesn't answer at all** (your server's connection) → nothing
   changes; a network outage must not wipe the whole pool.
+
+### 4b. Testing the next channel — only then
+When the channel **in the post** is deleted (or you demote the account there),
+the next channel is tested **before** the post switches to it. This is the
+only time a bio or name is changed:
+
+1. write a new random **bio**
+2. add a **`.` to its name** and take it straight back off
+
+Either one working → the post switches and you get *🔁 Post switched to the
+next channel*. Both failing → the `.` post test decides; if that's refused
+too, that channel is skipped as deleted and the one after it is tested.
 
 ### 5. Why you can't lose a working channel
 - **Unclear is not dead.** A timeout, a server error, a flood-wait or a reply
@@ -127,7 +136,7 @@ It names the user ID that was ignored. That's the ID `OWNER_ID` needs to be
 | `/status` | pool, post, last check |
 | `/channels` | every channel and its state |
 | `/links` | every invite link |
-| `/scan` | check everything right now |
+| `.check` | check every channel right now (also `/check`, `/scan`) |
 | `/find` | look for channels it's admin in |
 | `/use <id>` | show this channel in the post |
 | `/slots <n>` | how many link lines the post has |
@@ -179,7 +188,7 @@ State lives in `data.json`, logs in `saviour.log`.
 
 ```
 saviour.py   the bot: events, commands, the check loop
-engine.py    all Telegram work: probes, bios, links, the post
+engine.py    all Telegram work: checks, the "." test, takeover tests, links, the post
 ui.py        how every message looks: cards, lists, escaping, paging
 template.py  reply-.set posts: keep their formatting, swap only the links
 state.py     the JSON file it remembers things in
