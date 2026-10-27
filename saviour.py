@@ -7,14 +7,11 @@ How it works, start to finish:
   2. You add it to your public redirect channel and post ".set" there.
      If it isn't admin yet it quietly remembers and waits; the moment you
      promote it, the post goes up and it tells you.
-  3. Every few minutes (or on ".check") it checks each channel read-only:
-     can it open it, is it still admin, does the invite link work. Healthy
-     channels are never touched - constant edits get channels flagged.
-  4. When a check fails it posts a "." in that channel. Posted -> deleted
-     again at once, false alarm. Refused -> the channel is gone and leaves
-     the post right away (parked, never deleted, re-checked for ever).
-  5. Only then, before the next channel fills the post, does it change that
-     channel's bio and name once to prove it can act there.
+  3. Every 15 minutes (or on ".check") it posts a "." in each channel and
+     deletes it at once. Nothing else is ever changed - no bio, no name.
+  4. Posted -> alive. Refused -> the channel is gone: it leaves the post
+     right away and the post shows the next working channel. Parked
+     channels keep being tested and come back by themselves.
 
 Start it: python3 saviour.py   (setup.py does the login for you first)
 """
@@ -110,13 +107,13 @@ async def rewrite(message, text):
 
 
 def synced_card(title, chat_id, channel, rights):
-    bio = ("yes" if getattr(rights, "change_info", False)
-           else "no " + ui.i("(needed to test it before it fills the post)"))
+    can_post = ("yes" if rights is None or getattr(rights, "post_messages", False)
+                else "no " + ui.i('(needed for the "." test - it would count as deleted)'))
     return ui.card("🟢", "Channel synced", [
         ui.kv("Name", ui.esc(title)),
         ui.kv("ID", ui.code(chat_id)),
         ui.kv("Invite", ui.esc(channel["link"]) if channel else "?"),
-        ui.kv("Change Info", bio),
+        ui.kv("Post right", can_post),
         ui.kv("Pool", f"{len(state.live())} live"),
     ])
 
@@ -353,10 +350,9 @@ async def on_membership(update):
             was_shown = (state.active_channel() or {}).get("id") == chat_id
             state.park(chat_id, "we were demoted")
             await state.save()
-            handover = await hand_over() if was_shown else None
             result = await engine.redraw_post()
-            if handover:
-                await tell_handover(state.get(chat_id), *handover, result)
+            if was_shown:
+                await tell_switch(state.get(chat_id), result)
             await tell(ui.card("🔴", "Demoted in a channel", [
                 ui.kv("Name", ui.esc(title)),
                 ui.kv("ID", ui.code(chat_id)),
@@ -367,49 +363,14 @@ async def on_membership(update):
 
 
 # ------------------------------------------------------------- health rounds
-async def hand_over():
-    """The channel in the post just left it: test the next one first.
-
-    Only now - never in a normal round - does a channel get a bio change and
-    a name change. One that fails both and then the "." post too is gone as
-    well: it's parked and the one after it is tested.
-
-    Returns (new_channel or None, test_note, [channels found gone]).
-    """
-    also_gone = []
-    for _ in range(len(state.channels)):
-        candidate = state.active_channel()
-        if candidate is None:
-            break
-        try:
-            usable, _, note = await engine.test_takeover(candidate)
-        except Exception as exc:
-            log.exception("testing %s blew up", candidate["id"])
-            usable, note = True, f"the test crashed ({engine.brief(exc)})"
-        if usable:
-            await state.save()
-            return candidate, note, also_gone
-        candidate["strikes"] = config.STRIKES
-        candidate["reason"] = note
-        state.park(candidate["id"], note)
-        also_gone.append(candidate)
-    await state.save()
-    return None, "", also_gone
-
-
-async def tell_handover(old, new, note, also_gone, result):
-    for channel in also_gone:
-        await tell(ui.card("🔴", "Next channel was deleted too — skipped", [
-            ui.kv("Name", ui.esc(channel["title"])),
-            ui.kv("ID", ui.code(channel["id"])),
-            ui.kv("Why", ui.i(channel.get("reason") or "unknown")),
-        ]))
+async def tell_switch(old, result):
+    """The channel in the post just left it: say which one shows now."""
+    new = state.active_channel()
     if new is None:
         return                       # ask_for_links_if_empty() takes it from here
-    await tell(ui.card("🔁", "Post switched to the next channel", [
+    await tell(ui.card("🔁", "Post switched to a working channel", [
         ui.kv("From", ui.esc(old["title"]) if old else "?"),
         ui.kv("To", ui.esc(new["title"])),
-        ui.kv("Test", ui.i(note)),
         ui.kv("Invite", ui.esc(new["link"])),
         ui.kv("Post", ui.post_result(result)),
     ]))
@@ -475,9 +436,7 @@ async def one_round():
     state.d["checked"] = int(time.time())
     await state.save()
     old = state.get(before) if before else None
-    handover = None
-    if old and old.get("offline"):
-        handover = await hand_over()
+    switched = bool(old and old.get("offline"))
     result = await engine.redraw_post()
     log.info("round done: %s live, %s parked | newly parked %s, relinked %s, "
              "recovered %s, unverified %s | post %s",
@@ -493,8 +452,8 @@ async def one_round():
             ui.kv("Pool", f"{len(state.live())} live"),
         ], foot="Kept in my list and re-tested every round — if it ever works "
                 "again it comes back by itself."))
-    if handover:
-        await tell_handover(old, *handover, result)
+    if switched:
+        await tell_switch(old, result)
     for channel in warned:
         await tell(ui.card("🟠", "A channel failed a check", [
             ui.kv("Name", ui.esc(channel["title"])),
@@ -515,7 +474,7 @@ async def one_round():
         await tell(ui.card("🟢", "Channel is back", [
             ui.kv("Name", ui.esc(channel["title"])),
             ui.kv("ID", ui.code(channel["id"])),
-        ], foot="It's working again and back in the post."))
+        ], foot="It's working again and back in the pool."))
     for channel, note in relinked:
         await tell(ui.card("🔁", "New invite link", [
             ui.kv("Name", ui.esc(channel["title"])),
@@ -625,7 +584,7 @@ async def cmd_help(event):
                       row("/channels", "every channel I know"),
                       row("/links", "every invite link")]),
             ui.b("Checks"),
-            ui.quote([row(".check", "check every channel right now (or /scan)"),
+            ui.quote([row(".check", "test every channel with a \".\" now (or /scan)"),
                       row("/find", "look for channels I'm admin in")]),
             ui.b("The post"),
             ui.quote([row("/use <id>", "show this channel in the post"),
@@ -707,8 +666,8 @@ async def cmd_scan(event):
     note = await answer(event, ui.card(
         "🔍", "Checking every channel…",
         foot=f"{len(state.channels)} channel(s), about "
-             f"{len(state.channels) * config.GAP}s or more. Read-only — healthy "
-             "channels aren't touched."))
+             f"{len(state.channels) * config.GAP}s or more. Each gets a \".\" that "
+             "is deleted at once."))
     await round_now()
     await rewrite(note, ui.card("✅", "Check finished"))
     await cmd_status(event)

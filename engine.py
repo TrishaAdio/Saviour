@@ -10,14 +10,12 @@ code is biased against ever producing one.
 import asyncio
 import html
 import logging
-import random
 import re
 
 from telethon import functions, types
 from telethon.errors import (
     ChannelInvalidError,
     ChannelPrivateError,
-    ChatAboutNotModifiedError,
     ChatAdminRequiredError,
     FloodWaitError,
     InviteHashExpiredError,
@@ -45,44 +43,9 @@ GONE = (ChannelPrivateError, ChannelInvalidError)
 # Verdicts from check().
 OK = "ok"              # verified working
 RELINKED = "relinked"  # was broken, fixed itself with a fresh link
-DEAD = "dead"          # Telegram is definite, and the probes agree
+DEAD = "dead"          # (kept for old data; check() no longer returns it)
 UNSURE = "unsure"      # no idea - change nothing
-GONE_FOR_SURE = "gone-for-sure"  # the dot test failed: out of the post right now
-
-# Random channel bios. One is written only when a channel is about to fill
-# the post (test_takeover) - never in normal rounds.
-BIOS = [
-    "🔥 Fresh content every day. Join before the link changes.",
-    "⚡ The main channel moves often — stay close.",
-    "🎬 New uploads daily. Don't lose the link.",
-    "🚀 Back soon with more. Invite your friends.",
-    "💎 Quality over quantity. Always.",
-    "📌 Save this channel, links rotate regularly.",
-    "🎁 Daily drops. Stay tuned.",
-    "🔔 Turn notifications on, posts move fast.",
-    "🌟 The good stuff is always here first.",
-    "🎯 One channel, everything you need.",
-    "🆕 Updated today. Check the pinned post.",
-    "📢 Official backup. Main channel rotates.",
-    "🔒 Private drops for members only.",
-    "🎥 Watch it here before it's gone.",
-    "💬 Requests open. Ask in the comments.",
-    "🧲 If a link stops working, we always come back.",
-    "🏆 The most reliable source, day after day.",
-    "🎉 Thanks for being here. More coming tonight.",
-    "🌍 Members from everywhere. All welcome.",
-    "🛡 This channel is protected and always restored.",
-    "📅 New posts every evening.",
-    "🎧 Relax and scroll. We do the finding for you.",
-    "🍿 Grab a seat, the next drop is close.",
-    "✨ Small channel, big content.",
-    "🔁 Links refresh automatically — never panic.",
-    "🥇 Ranked #1 by our members.",
-    "🧭 Lost? This channel always points you home.",
-    "🌙 Late-night drops are the best drops.",
-    "☀️ Good morning. New content is already up.",
-    "📀 The archive keeps growing.",
-]
+GONE_FOR_SURE = "gone-for-sure"  # the "." test was refused: out of the post now
 
 tg = None        # the TelegramClient, set by connect_client()
 ME = 0           # our own user id
@@ -235,94 +198,16 @@ async def rotate_link(channel, entity):
     return False, "the fresh link has not confirmed yet"
 
 
-# ---------------------------------------------------------------- the bio
-async def write_bio(channel, entity):
-    """Put a random line in the channel bio (only from test_takeover)."""
-    pool = [b for b in BIOS if b != channel.get("last_bio")] or BIOS
-    text = random.choice(pool)[:255]
-    try:
-        await call(lambda: tg(functions.messages.EditChatAboutRequest(entity, text)),
-                   "write bio")
-    except ChatAboutNotModifiedError:
-        return True, ""               # already there: we can still write
-    except ChatAdminRequiredError:
-        return False, 'missing the "Change Info" right'
-    except (RPCError, *HICCUP) as exc:
-        return False, brief(exc)
-    channel["last_bio"] = text
-    return True, ""
-
-
-async def rename_test(entity, title):
-    """Add a "." to the name and take it straight back off. (ok, why_not)."""
-    name = (title or getattr(entity, "title", "") or "")[:250]
-    if not name:
-        return False, "no name to test with"
-    try:
-        await call(lambda: tg(functions.channels.EditTitleRequest(entity, name + ".")),
-                   "rename test")
-    except ChatAdminRequiredError:
-        return False, 'missing the "Change Info" right'
-    except (RPCError, *HICCUP) as exc:
-        return False, brief(exc)
-    await asyncio.sleep(1)
-    try:
-        await call(lambda: tg(functions.channels.EditTitleRequest(entity, name)),
-                   "rename test undo")
-    except (RPCError, *HICCUP) as exc:
-        log.error("could not restore the name of %s - it may still end in a dot: %s",
-                  peer(entity), brief(exc))
-    return True, ""
-
-
-async def test_takeover(channel):
-    """Test a channel *before* it fills the post - only ever then.
-
-    Runs when the channel in the post was deleted and this one is next in
-    line: write a new bio and add/remove a "." in its name. Either working
-    proves we can act in it. If both fail, the "." post test decides.
-
-    Returns (usable, verdict, note). verdict is GONE_FOR_SURE when it is
-    gone too, so the caller parks it and moves on to the next one.
-    """
-    try:
-        entity = await entity_of(channel["id"])
-    except (*GONE, ValueError):
-        try:
-            entity = await tg.get_input_entity(channel["id"])
-        except ValueError:
-            entity = None
-    except (RPCError, *HICCUP) as exc:
-        return True, UNSURE, f"couldn't test it ({brief(exc)}) - using it anyway"
-
-    bio_ok, bio_why = (await write_bio(channel, entity)) if entity is not None \
-        else (False, "can't reach it")
-    name_ok, name_why = (await rename_test(entity, channel.get("title"))) \
-        if entity is not None else (False, "can't reach it")
-    if bio_ok or name_ok:
-        done = " and ".join(w for w, ok in (("bio changed", bio_ok),
-                                            ("name changed", name_ok)) if ok)
-        return True, OK, done
-    verdict, how = await _confirm(entity, f"bio ({bio_why}) and name ({name_why}) "
-                                          "changes both failed")
-    if verdict == GONE_FOR_SURE:
-        return False, verdict, how
-    if verdict == UNSURE:
-        return True, UNSURE, how
-    return True, OK, f"bio and name changes failed, but {how}"
-
-
 # ------------------------------------------------------------ the dot test
 ALIVE, GONE_NOW, NO_ANSWER = "alive", "gone", "no-answer"
 
 
 async def dot_test(target):
-    """The one test that decides whether a channel is gone.
+    """Post a "." in the channel and delete it again at once.
 
-    Post a "." in it. If that works, delete it again at once: the channel is
-    alive. If Telegram refuses the post - for any reason - the channel is
-    treated as deleted. Only a failure to reach Telegram at all (our own
-    connection) proves nothing, and comes back as NO_ANSWER.
+    Posted -> the channel is alive. Refused, for any reason -> treated as
+    deleted. Only a failure to reach Telegram at all (our own connection)
+    proves nothing and comes back as NO_ANSWER.
 
     Returns (result, what_happened).
     """
@@ -333,83 +218,52 @@ async def dot_test(target):
     except HICCUP as exc:
         return NO_ANSWER, f"Telegram didn't answer the test post ({brief(exc)})"
     except (RPCError, ValueError) as exc:
-        return GONE_NOW, f"a test \".\" post was refused ({brief(exc)})"
+        return GONE_NOW, f'a test "." post was refused ({brief(exc)})'
     try:
         await call(lambda: tg.delete_messages(target, [sent.id]), "dot test undo")
     except (RPCError, *HICCUP) as exc:
-        log.error("left a test dot in %s: %s", peer(target) if hasattr(target, "id")
-                  else target, brief(exc))
-    return ALIVE, "a test \".\" post went through (deleted again at once)"
+        log.error("left a test dot in %s: %s", target, brief(exc))
+    return ALIVE, ""
 
 
-async def _confirm(target, problem):
-    """A check just failed: settle it on the spot with the dot test."""
-    result, how = await dot_test(target)
-    if result == GONE_NOW:
-        return GONE_FOR_SURE, f"{problem} - and {how}"
-    if result == NO_ANSWER:
-        return UNSURE, f"{problem}, but {how}"
-    return None, how                     # alive: the caller decides what's next
+async def _target(cid):
+    """Something we can post to: the peer saved in the session, else a lookup."""
+    try:
+        return await tg.get_input_entity(cid)
+    except ValueError:
+        pass
+    try:
+        return await entity_of(cid)
+    except (*GONE, ValueError):
+        return None
 
 
 # --------------------------------------------------------------- one check
 async def check(channel):
-    """Check one channel. Returns (verdict, note)."""
-    cid = channel["id"]
+    """One channel, one test: post a "." and delete it. Returns (verdict, note).
 
-    # 1. Can we still open it?
+    Nothing else is ever changed in the channel - no bio, no name.
+    """
     try:
-        entity = await entity_of(cid)
-    except (*GONE, ValueError):
-        # Telegram says the same thing for "deleted", "you were banned" and,
-        # now and then, wrongly for a healthy channel. The dot test settles it,
-        # through the peer saved in our session.
-        try:
-            target = await tg.get_input_entity(cid)
-        except ValueError:
-            target = None
-        verdict, how = await _confirm(target, "Telegram refused to open it")
-        if verdict:
-            return verdict, how
-        return UNSURE, f"false alarm: Telegram refused it, but {how}"
+        target = await _target(channel["id"])
     except (RPCError, *HICCUP) as exc:
         return UNSURE, f"Telegram did not answer ({brief(exc)})"
 
-    # 2. Are we still admin? (Without that we can't keep its link alive.)
-    try:
-        rights = await rights_in(entity)
-    except GONE:
-        rights = None
-    except (RPCError, *HICCUP) as exc:
-        return UNSURE, f"could not read our rights ({brief(exc)})"
-    if rights is None or not getattr(rights, "is_admin", False):
-        verdict, how = await _confirm(entity, "I'm not admin there any more")
-        if verdict:
-            return verdict, how
-        return UNSURE, f"Telegram says I'm not admin, but {how}"
+    result, how = await dot_test(target)
+    if result == GONE_NOW:
+        return GONE_FOR_SURE, how
+    if result == NO_ANSWER:
+        return UNSURE, how
 
-    # Nothing is written to the channel in a normal round: constant bio and
-    # name edits on healthy channels are what gets them flagged. Those are
-    # saved for test_takeover(), when a channel is about to fill the post.
-
-    # 3. Does the invite link still work?
+    # Alive. Make sure the invite link people see still works (read-only);
+    # a revoked one is replaced with a fresh, verified link.
     works = await link_works(channel.get("link") or "")
-    if works is True:
+    if works is not False:
         return OK, ""
-    if works is None:
-        return UNSURE, "the link check was inconclusive"
-
-    # The link is dead but the channel and our rights are fine: the invite
-    # was revoked. Make a new one rather than give up a working channel.
-    if not getattr(rights, "invite_users", False):
-        return DEAD, 'its link died and we lack the "Invite Users via Link" right'
-    fixed, detail = await rotate_link(channel, entity)
+    fixed, detail = await rotate_link(channel, target)
     if fixed:
-        return RELINKED, "its old link had stopped working"
-    verdict, how = await _confirm(entity, f"its link died ({detail})")
-    if verdict:
-        return verdict, how
-    return UNSURE, f"its link died; {detail}"
+        return RELINKED, "its old invite link had stopped working"
+    return UNSURE, f"its invite link died; {detail}"
 
 
 # ------------------------------------------------------------ joining the pool

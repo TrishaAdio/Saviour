@@ -29,7 +29,7 @@ python3 saviour.py        # or venv/bin/python3 saviour.py
 
 ### 1. Adding a backup channel
 Add the account, promote it to admin. It needs **Invite Users via Link**;
-give it **Change Info** too, so it can test the channel before it fills the post. The moment you
+it also needs **Post Messages** for the `.` test. The moment you
 promote it:
 
 ```
@@ -74,38 +74,24 @@ https://t.me/+pbib86sOwyU1NjRh
 Every line shows the channel that is currently live. When it dies, the **same
 post is edited** to show the next one — never reposted.
 
-### 3. Quiet checks
-Every `CHECK_EVERY` seconds (default 300), or when you send **`.check`**, each
-channel is checked **read-only**:
+### 3. The "." test — every 15 minutes
+Every `CHECK_EVERY` seconds (default 900 = 15 min), or when you send
+**`.check`**, the account **posts a `.` in each channel and deletes it at
+once**. Nothing else is ever changed: no bio, no name.
 
-1. open it and confirm it's still admin
-2. ask Telegram directly whether the invite link still works
-
-Healthy channels are **never edited**. Constant bio and name changes for no
-reason are what get channels flagged and deleted. If a link is dead but the
-channel is fine, a fresh invite is made and *verified* before it's used.
-
-### 4. The "." test — settled on the spot
-When a check fails, the account doesn't wait for more rounds. It **posts a
-`.` in the channel right away**:
-
-- **it posts** → deleted again at once. The channel is alive and it was a false alarm.
+- **it posts** → the channel is alive. Its invite link is also checked
+  (read-only); if that link was revoked, a fresh one is made and verified.
 - **Telegram refuses it, for any reason** → the channel is treated as deleted
-  and leaves the post **immediately**.
+  and leaves the post **immediately**. The post switches to the next working
+  channel and you get *🔁 Post switched to a working channel*.
 - **Telegram doesn't answer at all** (your server's connection) → nothing
   changes; a network outage must not wipe the whole pool.
 
-### 4b. Testing the next channel — only then
-When the channel **in the post** is deleted (or you demote the account there),
-the next channel is tested **before** the post switches to it. This is the
-only time a bio or name is changed:
+Removed channels keep getting the `.` test; the moment one posts again it's
+back in the pool.
 
-1. write a new random **bio**
-2. add a **`.` to its name** and take it straight back off
-
-Either one working → the post switches and you get *🔁 Post switched to the
-next channel*. Both failing → the `.` post test decides; if that's refused
-too, that channel is skipped as deleted and the one after it is tested.
+> The account needs the **Post Messages** right in every backup channel.
+> Without it the `.` is refused and the channel counts as deleted.
 
 ### 5. Why you can't lose a working channel
 - **Unclear is not dead.** A timeout, a server error, a flood-wait or a reply
@@ -136,7 +122,7 @@ It names the user ID that was ignored. That's the ID `OWNER_ID` needs to be
 | `/status` | pool, post, last check |
 | `/channels` | every channel and its state |
 | `/links` | every invite link |
-| `.check` | check every channel right now (also `/check`, `/scan`) |
+| `.check` | `.` test every channel right now (also `/check`, `/scan`) |
 | `/find` | look for channels it's admin in |
 | `/use <id>` | show this channel in the post |
 | `/slots <n>` | how many link lines the post has |
@@ -175,7 +161,7 @@ session); clean up with `pkill -f saviour.py`.
 | `OWNER_ID` | — | your own account, not the bot's |
 | `POST_SLOTS` | `5` | link lines in the post |
 | `POST_TITLE` | `none` | bold line above the links |
-| `CHECK_EVERY` | `300` | seconds between health rounds |
+| `CHECK_EVERY` | `900` | seconds between `.` tests (15 min) |
 | `SYNC_EVERY` | `900` | seconds between searches for new channels (`0` = off) |
 | `GAP` | `3` | seconds between two channels in one round |
 | `MAX_WAIT` | `300` | longest flood-wait to sit out |
@@ -188,7 +174,7 @@ State lives in `data.json`, logs in `saviour.log`.
 
 ```
 saviour.py   the bot: events, commands, the check loop
-engine.py    all Telegram work: checks, the "." test, takeover tests, links, the post
+engine.py    all Telegram work: the "." test, links, the post
 ui.py        how every message looks: cards, lists, escaping, paging
 template.py  reply-.set posts: keep their formatting, swap only the links
 state.py     the JSON file it remembers things in

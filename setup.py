@@ -117,7 +117,7 @@ def write_env(values):
         "",
         "# Optional:",
         "# POST_TITLE=none        # bold line above the links; none = no title",
-        "# CHECK_EVERY=300        # seconds between health rounds",
+        "# CHECK_EVERY=900        # seconds between \".\" tests (15 min)",
         "# SYNC_EVERY=900         # seconds between searches for new channels",
         "# GAP=3                  # seconds between two channels in a round",
         "# MAX_WAIT=300           # longest flood-wait to sit out",
