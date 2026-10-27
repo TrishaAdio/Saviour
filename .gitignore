@@ -1,11 +1,11 @@
 .env
 data.json
-data.json.tmp
+data.tmp
 *.session
 *.session-journal
-bot.log
+saviour.log
+saviour.lock
 __pycache__/
 *.pyc
 .venv/
 venv/
-bot.lock
