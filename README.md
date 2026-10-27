@@ -48,8 +48,15 @@ Pool: 3 live
   `SYNC_EVERY` seconds, or run `/find`.
 
 ### 2. The redirect post
-Add the account to your public channel and post **`.set`** there (or `.set 3`
-for 3 lines).
+**Already have a post you like?** Reply **`.set`** to it. The account takes
+that post over and keeps its exact look: quotes, bold, emoji, custom emoji,
+hidden hyperlinks. Only the t.me links inside it are swapped from then on. It
+needs the **Post Messages** and **Edit Messages of Others** rights. If it made
+a default post in the same channel earlier, that duplicate is deleted.
+
+Otherwise add the account to your public channel and post **`.set`** there
+(or `.set 3` for 3 lines). If a redirect post is already up in that channel,
+a plain `.set` updates it instead of posting a second one.
 
 - **Already admin** → your `.set` is deleted and the post appears at once.
 - **Not admin yet** → *nothing happens*. It quietly remembers, tells you it's
@@ -171,6 +178,7 @@ State lives in `data.json`, logs in `saviour.log`.
 saviour.py   the bot: events, commands, the check loop
 engine.py    all Telegram work: probes, bios, links, the post
 ui.py        how every message looks: cards, lists, escaping, paging
+template.py  reply-.set posts: keep their formatting, swap only the links
 state.py     the JSON file it remembers things in
 config.py    reads .env
 setup.py     the installer
