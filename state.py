@@ -27,7 +27,7 @@ EMPTY = {
 class State:
     def __init__(self, path=config.DATA):
         self.path = path
-        self._lock = asyncio.Lock()
+        self._lock = None    # made on first use, inside the running loop
         self.d = json.loads(json.dumps(EMPTY))
         if path.exists():
             try:
@@ -38,8 +38,14 @@ class State:
                 log.error("data.json unreadable (%s) - starting fresh", exc)
 
     async def save(self):
+        # Created here, not in __init__: on Python 3.8/3.9 a Lock made at
+        # import time is tied to a different loop than asyncio.run's.
+        if self._lock is None:
+            self._lock = asyncio.Lock()
         async with self._lock:
-            await asyncio.to_thread(self._write)
+            # run_in_executor rather than asyncio.to_thread: to_thread only
+            # exists from Python 3.9, and setup.py accepts 3.8.
+            await asyncio.get_running_loop().run_in_executor(None, self._write)
 
     def _write(self):
         tmp = self.path.with_suffix(".tmp")

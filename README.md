@@ -103,6 +103,15 @@ Any one of those working means the channel is alive and the alarm was false.
 
 ## Commands (your chat with the account)
 
+Commands are accepted from two places, both in a **private chat**:
+
+- your owner account (`OWNER_ID`), messaging the bot account, or
+- the bot account itself: type them in its Saved Messages or any private chat.
+
+Anyone else is ignored. If your commands get no answer, check `saviour.log`.
+It names the user ID that was ignored. That's the ID `OWNER_ID` needs to be
+(re-run `python3 setup.py`, or edit `.env`, then restart).
+
 | command | |
 |---|---|
 | `/status` | pool, post, last check |
