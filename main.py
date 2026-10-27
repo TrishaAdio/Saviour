@@ -422,6 +422,97 @@ async def cmd_active(event) -> None:
     await event.reply(f"⭐ Active: {channel['title']}. Post: {await core.refresh_post()}")
 
 
+# ------------------------------------------------------------- .clearall
+@owner_only
+async def cmd_clearall(event) -> None:
+    if not event.pattern_match.group(1):
+        await event.reply(
+            "🧨 .clearall wipes the whole account:\n"
+            "• deletes every group/channel it created\n"
+            "• leaves every other group and channel (including the whole link pool "
+            "and the redirect channel)\n"
+            "• blocks every DM and deletes its history\n\n"
+            "Only this chat and Saved Messages survive. The redirect state "
+            "(pool, post) is wiped too.\n\n"
+            "This cannot be undone. Send  .clearall confirm  to do it.")
+        return
+    await run_clearall(event)
+
+
+async def run_clearall(event) -> None:
+    status = await event.reply("🧨 Clearing the account… this can take a while.")
+    counts = {"deleted_channels": 0, "deleted_groups": 0, "left_channels": 0,
+              "left_groups": 0, "blocked": 0, "failed": 0}
+    dialogs = [d async for d in tg.iter_dialogs()]
+
+    for i, dialog in enumerate(dialogs, 1):
+        entity = dialog.entity
+        try:
+            if isinstance(entity, types.User):
+                if entity.id in (core.ME_ID, config.OWNER_ID):
+                    continue  # Saved Messages and this command chat
+                await core.rpc(
+                    tg(functions.messages.DeleteHistoryRequest(
+                        entity, max_id=0, just_clear=False, revoke=True)),
+                    "delete history")
+                await core.rpc(tg(functions.contacts.BlockRequest(entity)), "block")
+                counts["blocked"] += 1
+            elif isinstance(entity, types.Chat):  # basic group
+                if getattr(entity, "creator", False):
+                    await core.rpc(tg(functions.messages.DeleteChatRequest(entity.id)),
+                                   "delete group")
+                    counts["deleted_groups"] += 1
+                else:
+                    await core.rpc(
+                        tg(functions.messages.DeleteChatUserRequest(
+                            entity.id, types.InputUserSelf())),
+                        "leave group")
+                    counts["left_groups"] += 1
+            elif isinstance(entity, types.Channel):
+                if getattr(entity, "creator", False):
+                    await core.rpc(tg(functions.channels.DeleteChannelRequest(entity)),
+                                   "delete channel")
+                    if getattr(entity, "megagroup", False):
+                        counts["deleted_groups"] += 1
+                    else:
+                        counts["deleted_channels"] += 1
+                else:
+                    await core.rpc(tg(functions.channels.LeaveChannelRequest(entity)),
+                                   "leave channel")
+                    if getattr(entity, "megagroup", False):
+                        counts["left_groups"] += 1
+                    else:
+                        counts["left_channels"] += 1
+        except Exception as exc:
+            counts["failed"] += 1
+            log.warning("clearall: failed on %s: %s", getattr(entity, "id", "?"), exc)
+        if i % 5 == 0:
+            try:
+                await status.edit(f"🧨 Clearing… {i}/{len(dialogs)} dialogs done.")
+            except RPCError:
+                pass
+        await asyncio.sleep(config.REQUEST_GAP)
+
+    # Everything is left/deleted - the redirect state is meaningless now.
+    store.data["channels"] = []
+    store.clear_post()
+    store.pending_set = None
+    store.data["active_id"] = None
+    store.awaiting_links = False
+    await store.save()
+
+    await status.edit(
+        "🧨 Account cleared.\n"
+        f"• Channels deleted (created by me): {counts['deleted_channels']}\n"
+        f"• Groups deleted (created by me): {counts['deleted_groups']}\n"
+        f"• Channels left: {counts['left_channels']}\n"
+        f"• Groups left: {counts['left_groups']}\n"
+        f"• DMs blocked + wiped: {counts['blocked']}\n"
+        f"• Failed: {counts['failed']}\n\n"
+        "Link pool and redirect post state wiped. This chat and Saved Messages "
+        "were kept on purpose. I'm still running - add me to channels to start over.")
+
+
 # ------------------------------------------------- pasted links in the DM
 ID_RE = re.compile(r"^(-100\d{5,})\s*$")
 
@@ -455,7 +546,7 @@ async def on_owner_text(event: events.NewMessage.Event) -> None:
     if not event.is_private or event.sender_id != config.OWNER_ID:
         return
     text = event.raw_text or ""
-    if text.startswith("/"):
+    if text.startswith(("/", ".")):
         return  # commands handled by the specific handlers
     added, failed = [], []
     for line in text.splitlines():
@@ -507,6 +598,7 @@ def register_handlers() -> None:
     tg.add_event_handler(cmd_slots, events.NewMessage(pattern=r"(?i)^/slots\s+(\d+)\s*$"))
     tg.add_event_handler(cmd_remove, events.NewMessage(pattern=r"(?i)^/remove\s+(-?\d+)\s*$"))
     tg.add_event_handler(cmd_active, events.NewMessage(pattern=r"(?i)^/active\s+(-?\d+)\s*$"))
+    tg.add_event_handler(cmd_clearall, events.NewMessage(pattern=r"(?i)^\.clearall(\s+confirm)?\s*$"))
     tg.add_event_handler(on_owner_text, events.NewMessage())  # owner DM checked inside
 
 

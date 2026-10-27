@@ -144,8 +144,24 @@ the post is fixed immediately.
 | `/remove <id>` | drop a channel from the pool |
 | `/unset` | forget the redirect post |
 | `/cancel` | cancel link input |
+| `.clearall` | wipe the account (see below) |
 
 In a channel: `.set` / `.set 3` claims the redirect post.
+
+### `.clearall` — wipe the account
+Nuclear option for starting over (or retiring the account). Send `.clearall`
+in the DM to see what it does, then `.clearall confirm` to run it:
+
+- **deletes** every group and channel the account created
+- **leaves** every other group and channel — including the whole link pool
+  and the redirect channel
+- **blocks** every DM and **deletes its history** (revoked both sides where
+  Telegram allows)
+
+Only the command chat and Saved Messages survive, and the redirect state
+(pool, post, pending `.set`) is wiped. The userbot keeps running afterwards,
+so you can rebuild immediately. A progress message counts the dialogs as it
+goes and ends with a full summary.
 
 ## Keep it running
 
