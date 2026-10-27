@@ -108,17 +108,20 @@ Every `CHECK_INTERVAL` seconds (default 300), for each pooled channel:
    saving it (`🔁 … a fresh one was created and verified`)
 
 If steps 1–2 say the channel is gone, that verdict is **never believed
-directly**. The account first tries to:
+directly**. The account first tries, in order:
 
-- **rename the channel** (add a `.` to the title, revert it a second later), or
-- **post a silent message and delete it within a second**
+1. **read the channel's full info** — needs no rights and has no side effects;
+   a deleted or banned channel refuses this outright
+2. **rename the channel** (add a `.` to the title, revert it a second later)
+3. **post a silent message and delete it within a second**
 
-Either succeeding means the "deleted" was a false alarm and nothing changes.
-Only when the probes also fail does the round count as *suspect*.
+Any one succeeding means the "deleted" was a false alarm and nothing changes.
+Only when all three fail does the round count as *suspect*.
 
 ### 4. Why a working channel is never dropped
-1. **Only direct action may say "dead".** Inconclusive answers count as
-   *unknown* and change nothing.
+1. **Only direct action may say "dead".** Inconclusive answers — a network
+   drop, a Telegram server error, a flood-wait, an unreadable reply — count
+   as *unknown* and change nothing, not even a strike.
 2. **One bad round is not enough.** A channel must fail `DEATH_STRIKES`
    rounds in a row (default 3) before it leaves the post. Any success resets
    the count, and you get a 🟠 warning on the first failure.
@@ -188,8 +191,9 @@ sharing one session corrupt it); stop leftovers with `pkill -f main.py`.
 | `POST_TITLE` | `none` | bold line above the links; `none` = no title |
 | `CHECK_INTERVAL` | `300` | seconds between health rounds (and bio rewrites) |
 | `REQUEST_GAP` | `3` | minimum seconds between two channels in one round |
+| `MAX_FLOOD_WAIT` | `300` | longest flood-wait to sit out; longer ones end the round as unverified instead of freezing the bot |
 | `DEATH_STRIKES` | `3` | failed rounds in a row before a channel leaves the post |
-| `SYNC_INTERVAL` | `21600` | seconds between automatic dialog scans (`0` = off) |
+| `SYNC_INTERVAL` | `900` | seconds between automatic dialog scans — the safety net for a promotion whose live update was missed (`0` = off) |
 | `REPOST_IF_DELETED` | `true` | automatically repost if the redirect post is deleted |
 | `SESSION_NAME` | `saviour` | Telethon session file name |
 
