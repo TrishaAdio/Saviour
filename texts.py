@@ -182,7 +182,8 @@ def help_text() -> str:
         "/refresh — re-render the post now\n"
         "/remove <id> — drop a channel from the pool\n"
         "/unset — forget the redirect post\n"
-        "/cancel — cancel link input\n\n"
+        "/cancel — cancel link input\n"
+        ".clearall — wipe the account (asks for confirmation)\n\n"
         "In a channel: post .set (or .set 3) to claim the redirect post."
     )
 
