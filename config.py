@@ -38,7 +38,7 @@ SLOTS = _int("POST_SLOTS", 5)                 # link lines in the post
 TITLE = (os.getenv("POST_TITLE") or "none").strip()   # "none" = no title line
 
 # --- timing ----------------------------------------------------------------
-CHECK_EVERY = _int("CHECK_EVERY", 300)        # seconds between health rounds
+CHECK_EVERY = _int("CHECK_EVERY", 900)        # seconds between "." tests (15 min)
 SYNC_EVERY = _int("SYNC_EVERY", 900)          # seconds between dialog scans
 GAP = max(_int("GAP", 3), 1)                  # seconds between two channels
 MAX_WAIT = max(_int("MAX_WAIT", 300), 10)     # longest flood-wait to sit out
