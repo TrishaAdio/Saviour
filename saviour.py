@@ -49,8 +49,9 @@ log = logging.getLogger("saviour")
 tg = None
 _lockfile = None
 # One round at a time: /scan firing while the timer runs would have two
-# rounds fighting over the same strike counters.
-_round = asyncio.Lock()
+# rounds fighting over the same strike counters. Created in start(), inside
+# the running loop (on Python 3.8/3.9 an import-time Lock binds the wrong one).
+_round = None
 
 
 def only_one_copy():
@@ -383,10 +384,29 @@ async def sync_loop():
 
 
 # ---------------------------------------------------------------- commands
+def may_command(event):
+    """Who is allowed to give commands, and where.
+
+    - OWNER_ID, in its private chat with this account (the normal way), or
+    - this account itself, typing in any private chat or Saved Messages
+      (the usual userbot habit - the message is outgoing, so sender == us).
+    """
+    if not event.is_private:
+        return False
+    return event.out or event.sender_id in (config.OWNER_ID, engine.ME)
+
+
 def owner(func):
     @functools.wraps(func)
     async def guard(event):
-        if not event.is_private or event.sender_id != config.OWNER_ID:
+        if not may_command(event):
+            # Used to be silent, which looked exactly like "commands are
+            # broken". Say in the log who tried, so a wrong OWNER_ID shows.
+            if event.is_private:
+                log.warning("ignored %r from user %s: only OWNER_ID=%s (or this "
+                            "account itself) may give commands. Fix OWNER_ID in "
+                            ".env if that was you.", (event.raw_text or "")[:40],
+                            event.sender_id, config.OWNER_ID)
             return
         try:
             await func(event)
@@ -714,7 +734,8 @@ def hook_up():
 
 
 async def start():
-    global tg
+    global tg, _round
+    _round = asyncio.Lock()
     if not config.API_ID or not config.API_HASH:
         raise SystemExit("API_ID / API_HASH missing — run: python3 setup.py")
     if not config.OWNER_ID:
@@ -730,6 +751,22 @@ async def start():
     if me.id == config.OWNER_ID:
         log.warning("OWNER_ID is this same account: notifications land in Saved "
                     "Messages and pasted links are ignored. Use your other account.")
+    else:
+        # A bare numeric id can only be messaged once Telethon has seen that
+        # user. A fresh session (or a moved one) hasn't, so every DM to the
+        # owner used to fail with "Could not find the input entity". Loading
+        # the chat list once fills the cache.
+        try:
+            await tg.get_input_entity(config.OWNER_ID)
+        except ValueError:
+            try:
+                await tg.get_dialogs(limit=None)
+                await tg.get_input_entity(config.OWNER_ID)
+            except (ValueError, RPCError, *engine.HICCUP):
+                log.warning("can't reach OWNER_ID=%s yet - send this account any "
+                            "message from that account once.", config.OWNER_ID)
+    log.info("commands accepted from OWNER_ID=%s and from this account itself",
+             config.OWNER_ID)
 
     asyncio.create_task(health_loop())
     asyncio.create_task(sync_loop())
