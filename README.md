@@ -1,168 +1,140 @@
-# Redirect Bot
+# Saviour — redirect userbot
 
-Keeps a "Redirecting..." post in your public channel always pointing at a **live**
-channel. When a linked channel gets deleted or the bot loses admin there, the bot
-swaps in a backup link by **editing the same post** — identical formatting, no repost.
-When it runs out of backups it DMs you for new links.
+A **pure userbot** (one Telegram user account, Telethon — no bot token, no Bot
+API) that keeps a *Redirecting…* post in your public channel always pointing at
+a **live** backup channel.
+
+You add the account to your channels and promote it. It does the rest:
+
+- notices the promotion instantly and DMs you **🟢 Channel synced**
+- waits patiently if it can't act yet (joined but not admin, `.set` before
+  admin) and tells you the moment it can
+- **rewrites every channel's bio with a random line every check round** — the
+  channels always look fresh, and a failed bio write is the first alarm bell
+- replaces a dead invite link with a fresh, verified one by itself
+- **never trusts a "channel deleted" verdict from indirect checks** — before
+  believing it, it proves death with direct actions only a live channel
+  allows: renaming the channel with a `.` and reverting, or posting a message
+  and deleting it within a second
+- edits the same redirect post in place when links change — no reposts, no
+  formatting loss
 
 ## Install
 
 ```bash
-python3 setup.py
+python3 -m venv venv
+venv/bin/pip install -r requirements.txt
+cp .env.example .env      # fill in API_ID, API_HASH, OWNER_ID
+venv/bin/python3 main.py  # first run asks for phone + login code
 ```
 
-It checks Python, installs `screen` and the pip packages, asks for your token /
-owner id / post settings, writes `.env`, and starts the bot in a `screen` session.
+- `API_ID` / `API_HASH`: [my.telegram.org](https://my.telegram.org/apps) →
+  *API development tools*
+- `OWNER_ID`: your main account's numeric id ([@userinfobot](https://t.me/userinfobot))
 
-| command | what it does |
-|---|---|
-| `python3 setup.py` | full install + configure + start |
-| `python3 setup.py --start` | start in screen |
-| `python3 setup.py --stop` | kill the session |
-| `python3 setup.py --restart` | restart |
-| `python3 setup.py --status` | running? |
-| `python3 setup.py --logs` | tail `bot.log` |
-| `screen -r redirectbot` | attach to the live console (`Ctrl+A` then `D` to detach) |
+The session is saved to `saviour.session` — it grants full access to the
+account, so **use a spare account** and never commit or share the file
+(it's in `.gitignore`).
 
-## Auto-detect
+## How it works
 
-You don't have to tell the bot anything. **Make it admin in a channel** and it
-notices immediately, checks its own rights, mints an invite link and adds the
-channel to the pool:
+### 1. Adding backup channels
+Add the account to a channel and promote it to admin (it needs **Invite Users
+via Link**; **Change Info** enables the bio updates). You get:
 
 ```
-🟢 Channel connected
-┃ Channel  Backup One
-┃ ID       -1001234567890
-┃ Invite   t.me/+AbCdEf123456
-┃ Access   Full admin
-┃ Pool     3 active
+🟢 Channel synced: Movies Backup
+ID: -1001234567890
+Invite: t.me/+AbCdEf123456
+Bio updates: on
+Pool: 3 active
 ```
 
-- Missing *Invite Users via Link* → it tells you exactly which permission to tick,
-  and adds the channel by itself once you do.
-- Admin but no post/edit/delete rights → still used as a **link source**, just
-  flagged as unable to host the `.set` post.
-- **Demoted or removed** → dropped from the pool instantly and the post is fixed
-  on the spot, without waiting for the next health check.
-- Promoted again while the pool is empty → the post is repaired automatically and
-  the begging stops.
-- Added to a **group** instead of a channel → ignored, with a note.
-- The channel hosting the `.set` post is **never** added as one of its own targets.
+- Promoted without *Invite Users via Link* → it tells you exactly which right
+  to tick, and adds the channel by itself once you do.
+- Demoted or kicked → the channel is parked offline instantly, the post is
+  fixed on the spot, and you're told. Re-promote and it comes back by itself.
+- Added to a **group** instead of a channel → ignored.
+- The channel hosting the redirect post is never pooled as its own target.
 
-Set `AUTO_ADD=false` in `.env` to require `/load` instead.
+Missed a promotion (account offline at that moment)? `/sync` (or the automatic
+sync every `SYNC_INTERVAL` seconds) walks the account's own dialogs — a
+userbot *can* list its channels — and connects everything it admins.
 
-> Auto-detect only sees a promotion **at the moment it happens**. If the bot was
-> stopped or restarting then, or the channel was promoted before the bot ever
-> ran, it never heard about it. That is what `/sync` fixes — see below.
+### 2. The redirect post
+Add the account to your redirect channel and post **`.set`** there (or
+`.set 3` for 3 lines). Two cases:
 
-## Finding channels the bot is already admin in: `/sync`
+- **Already admin** → the `.set` message is deleted and the redirect post
+  appears immediately:
 
-A bot **cannot ask Telegram which channels it is a member of** — the Bot API has
-no such call. So the bot looks from the other side, using the account you
-connected with `/login`:
+  ```
+  https://t.me/+pbib86sOwyU1NjRh
+  https://t.me/+pbib86sOwyU1NjRh
+  https://t.me/+pbib86sOwyU1NjRh
+  https://t.me/+pbib86sOwyU1NjRh
+  https://t.me/+pbib86sOwyU1NjRh
+  ```
 
-1. list every channel that account is an admin of
-2. ask Telegram, for each one, whether the **bot** is an admin there
-3. run the bot's own checks on each (admin, *Invite Users via Link*, a working
-   invite link) and connect the ones that pass
+- **Not admin yet** → nothing happens visibly; the account remembers the
+  request and waits. The moment you promote it, the post goes up and you get
+  **✅ Redirect post is live**. (It needs *Post Messages*; *Edit Messages* and
+  *Delete Messages* are needed to maintain it.)
 
-```
-✅ Channels connected
-┃ ✅ Movies Backup · connected
-┃ ✅ Series Hub · connected
-┃ ❗ Old Channel · needs Invite Users via Link
-┃ 👤 Account    read 20 channels you admin
-┃ 🔎 Found      13 with the bot as admin
-┃ ✅ Connected  12 new
-```
+### 3. Keeping every link alive
+Every `CHECK_INTERVAL` seconds (default 300), for each pooled channel:
 
-It runs by itself right after `/login`, at start-up, and every `SYNC_INTERVAL`
-seconds (default 6 hours; it only messages you when it connects something new).
-You can also run it any time with `/sync` or the **Sync channels** button in
-`/start`. It never duplicates a channel, and never uses the channel that hosts
-the redirect post as a target.
+1. open the channel and confirm the account is still admin
+2. **write a random line into the channel bio** — proof the channel is
+   writable, and it keeps the channels looking alive on its own
+3. ask Telegram directly whether the invite link still works
+   (`messages.checkChatInvite` — a real answer, not a web-page guess)
+4. if the invite was revoked: **mint a fresh link and verify it** before
+   saving it (`🔁 … a fresh one was created and verified`)
 
-**Limit:** only channels where the logged-in account is *also* an admin can be
-found this way. For any other, forward me a post from it or send its id with
-`/load`. Without `/login`, `/sync` can only re-check channels the bot has
-already seen (it remembers every channel it meets, even ones it failed to add).
+If steps 1–2 say the channel is gone, that verdict is **never believed
+directly**. The account first tries to:
 
-Also fixed: the bot no longer throws away queued updates when it starts, so a
-promotion made while it was down is processed once it is back (Telegram keeps
-them for 24 hours).
+- **rename the channel** (add a `.` to the title, revert it a second later), or
+- **post a silent message and delete it within a second**
 
-## Reliable link checks: `/login`
+Either succeeding means the "deleted" was a false alarm and nothing changes.
+Only when the probes also fail does the round count as *suspect*.
 
-A **bot account cannot ask Telegram whether an invite link still works** — that
-is a hard limit of the Bot API. Without help, the bot can only open `t.me` and
-guess from the page, which gets it wrong.
-
-Connect a user account once and Telegram answers directly:
-
-1. Get `api_id` and `api_hash` from [my.telegram.org](https://my.telegram.org/apps)
-   → *API development tools*
-2. DM the bot `/login` and follow the steps (api_id, api_hash, phone, the login
-   code, and the two-step password if the account has one)
-
-From then on every check calls `messages.checkChatInvite` /
-`contacts.resolveUsername`, so a **revoked invite, a banned channel or a deleted
-channel is detected for certain**. `/start` shows `Verify: User account @you`
-when it's active. `/logout` disconnects it.
-
-Right after login the bot **scans every channel once** and reports which links
-work. `/scan` repeats that at any time.
-
-**Until an account is connected, monitoring stays paused** (`REQUIRE_USERBOT`).
-Guessing from the t.me page is what previously dropped working channels, so the
-bot refuses to judge rather than risk it.
-
-### Your account won't get banned
-Only two read-only requests are ever made: *check invite* and *resolve
-username*. The bot never joins, leaves, messages, searches or scrapes. On top of
-that:
-
-- at least `MIN_REQUEST_GAP` seconds (default 3) between any two requests
-- requests are made one at a time, never in parallel
-- a flood-wait from Telegram pauses **all** checks until it fully expires, and
-  nothing is judged during the pause
-- the session is reused, so the account doesn't repeatedly re-authenticate
-
-## Why a working channel is never dropped
-
-The old version sometimes decided a live channel was dead and burned through the
-pool. Three rules now prevent that:
-
-1. **Only Telegram may say "dead".** A negative result from reading t.me counts
-   as *unknown*, never as dead.
-2. **One bad answer is not enough.** A channel must fail `DEATH_STRIKES`
-   checks in a row (default 3, one per `CHECK_INTERVAL`) before it leaves the
-   post. Any single success resets the count. You get a 🟠 warning on the first
-   failure, long before anything changes.
+### 4. Why a working channel is never dropped
+1. **Only direct action may say "dead".** Inconclusive answers count as
+   *unknown* and change nothing.
+2. **One bad round is not enough.** A channel must fail `DEATH_STRIKES`
+   rounds in a row (default 3) before it leaves the post. Any success resets
+   the count, and you get a 🟠 warning on the first failure.
 3. **Nothing is ever deleted.** A confirmed-dead channel is *parked offline*:
-   kept in the file, kept out of the post, and re-checked every round. If it
-   answers again it returns on its own, and you get a 🟢 *Channel is back* DM.
+   kept in the file, kept out of the post, re-checked every round. If it
+   answers again it returns on its own with a 🟢 DM.
 
-A revoked invite link is not treated as a dead channel either — the bot creates
-a fresh link, verifies it, and keeps the channel.
+Pool empty → 🆘 *No live links left* — paste new channel links in the DM and
+the post is fixed immediately.
 
-You can always overrule a verdict: open the channel in `/start` → **Channels**
-and press **✅ Use it anyway**.
+## Commands (owner DM only)
 
-> **Security.** The session grants full access to that account — use a spare one
-> if you can. The bot deletes the api_hash, code and password messages as they
-> arrive, and stores the session in `session.json` with owner-only permissions
-> (`chmod 600`). It is in `.gitignore`; never commit or share it. `/logout`
-> signs the account out and deletes the file.
+| command | |
+|---|---|
+| `/status` | pool, post location, last check |
+| `/channels` | list every channel with its state |
+| `/scan` | check all channels right now |
+| `/sync` | find channels the account admins and connect them |
+| `/load` | paste links after this to add channels manually |
+| `/active <id>` | channel shown in the post |
+| `/slots <n>` | link lines in the post (1–20) |
+| `/refresh` | re-render the post now |
+| `/remove <id>` | drop a channel from the pool |
+| `/unset` | forget the redirect post |
+| `/cancel` | cancel link input |
 
-Putting `API_ID` and `API_HASH` in `.env` (or answering them in `setup.py`) makes
-`/login` ask only for the phone number and code.
+In a channel: `.set` / `.set 3` claims the redirect post.
 
-## Keep it running (important)
+## Keep it running
 
-If the bot isn't running, nothing gets swapped. Running `python3 bot.py` in an
-SSH session stops the bot when the session closes. Use systemd instead; it
-restarts the bot on crashes and after reboots:
+Log in once by hand first (the first run needs your phone + code), then:
 
 ```bash
 cp saviour.service /etc/systemd/system/
@@ -171,212 +143,33 @@ systemctl enable --now saviour
 systemctl status saviour        # should say "active (running)"
 ```
 
-`/start` shows **Last check** — if that's more than a few minutes old, the bot
-isn't running.
+`/status` shows **Last check** — if that's more than a few minutes old, the
+userbot isn't running. A lock file refuses to start a second copy (two copies
+sharing one session corrupt it); stop leftovers with `pkill -f main.py`.
 
-### Run exactly one copy
-
-Two copies polling Telegram get `Conflict: terminated by other getUpdates
-request` and both misbehave. That usually means systemd *and* a screen session
-are both running it. The bot now refuses to start a second copy, but to clean up
-an existing mess:
-
-```bash
-pgrep -af bot.py                      # what's running
-pkill -f bot.py                       # stop all copies
-systemctl stop saviour 2>/dev/null    # stop the service if it exists
-screen -S saviour -X quit 2>/dev/null # stop the screen session
-```
-
-Then start **one**. Pick systemd *or* screen, not both.
-
-## Usage
-
-1. **Add the bot as admin** to each backup channel — it needs *Invite Users via Link*.
-   Auto-detect adds it to the pool right there; steps 2 is only for channels it
-   was already in before.
-2. DM the bot `/load`, then paste the channel links (one per line):
-   ```
-   @backup_one
-   https://t.me/backup_two
-   -1001234567890
-   ```
-   It verifies admin rights in each and replies **✅ Okay — access verified.**
-3. **Add the bot as admin** to your public channel (needs *Edit Messages*, plus
-   *Delete Messages* for the reply method).
-
-   **Already have a post? Reply `.set` to it.** The bot takes over *that* post,
-   copies its exact formatting (quote box, bold, emoji, hidden links, photo
-   caption, all of it) and swaps only the t.me links. Your `.set` reply is
-   deleted. The number of links stays whatever the post already had.
-
-   **No post yet? Just send `.set`.** That message is edited in place and
-   becomes the redirect post:
-
-   > **Redirecting...**
-   > ```
-   > https://t.me/+pbib86sOwyU1NjRh
-   > https://t.me/+pbib86sOwyU1NjRh
-   > https://t.me/+pbib86sOwyU1NjRh
-   > https://t.me/+pbib86sOwyU1NjRh
-   > https://t.me/+pbib86sOwyU1NjRh
-   > ```
-
-   The line count comes from `POST_SLOTS` in `.env` (default **5**). Override it
-   per post with `.set 3`, or change it live with `/slots 5`.
-4. From then on it checks every linked channel on a timer, **asking Telegram
-   whether each invite link still works** (see `/login` below). A channel that's
-   deleted, banned by Telegram, or whose link stopped working is dropped (or
-   gets a fresh link if the bot can still make one), and the post is **edited**
-   to show a live link.
-5. Pool empty → you get an *Action required · no live links* DM. Reply with new
-   links in the same chat; it verifies them and updates the post immediately,
-   no `/load` needed.
-
-### Private invite links
-`t.me/+hash` / `t.me/joinchat/...` links **cannot** be resolved by any Telegram bot.
-For a private channel, forward any post from it to the bot, or send its numeric
-`-100…` id. The bot then generates its own invite link for that channel.
-
-## Control panel
-
-Send `/start` to the bot. You get one panel message with buttons:
-
-```
-📊 Status        📡 Channels · 3
-📝 Redirect post ➕ Add channels
-❔ How it works  ✕ Close
-```
-
-Every button **edits that same message**; nothing new is sent per click. Every
-screen has a **‹ Back** button. From the panel you can:
-
-- **Channels:** tap a channel to see its invite link, then **⭐ Make active** or
-  **🗑 Remove** (with a confirmation step)
-- **Redirect post:** **↻ Refresh links**, change the line count with **− / +**
-  (default-format posts), or **⏹ Stop monitoring**
-- **Status:** full overview, with **↻ Update**
-
-Only the owner can use the buttons.
-
-## Commands (owner DM only)
-
-The panel covers all of these; the commands still work if you prefer typing.
-
-| command | |
-|---|---|
-| `/start` | open the control panel |
-| `/login` | connect a user account for reliable link checks |
-| `/logout` | disconnect the user account |
-| `/scan` | check every channel right now |
-| `/sync` | find channels the bot is admin in and connect them |
-| `/cancel` | stop whatever is in progress |
-| `/icons` | show or switch the Premium icons |
-| `/load` | verify and load backup channels |
-| `/status` | pool, active channel, post location |
-| `/refresh` | re-render the post right now |
-| `/active <id>` | make that channel the one shown |
-| `/slots <n>` | change how many link lines the post shows |
-| `/remove <id>` | drop a channel from the pool |
-| `/preview` | send sample notifications |
-| `/unset` | stop monitoring the post |
-
-## Notifications
-
-Every DM uses the same card layout: an icon title, a details panel (every row
-has its own icon), and at most one line telling you what happens next or what
-to do. The title icon shows how serious it is:
-
-| icon | meaning |
-|---|---|
-| check circle | done: channel connected, post linked |
-| info circle | info: startup, status |
-| exclamation | needs attention: missing permission, channel not responding |
-| cross circle | critical: channel taken out, no live links left |
-
-With icons off these are the coloured dots 🟢 🔵 🟠 🔴.
-
-```
-🔴 Channel offline
-┃ Channel  Movies Backup
-┃ ID       -1001234567890
-┃ Pool     2 active
-┃ Post     Updated
-```
-
-When the pool runs dry you get a 🔴 *Action required · no live links* card.
-Paste a new channel link in the chat and the post is fixed immediately. Run
-`/preview` to see samples.
-
-## Premium icons
-
-The whole interface (message titles, every detail row, and every button) uses
-the [tgmacicons](https://t.me/addemoji/tgmacicons) pack. Buttons get their icon
-through `icon_custom_emoji_id`, and the important ones are coloured: **Remove**
-and **Stop monitoring** are red, **Make active** and **Refresh links** blue,
-**Add channels** and **Use it anyway** green.
-
-**Telegram only allows this when the bot's owner has Telegram Premium.** The bot
-is built so a missing subscription costs nothing but the icons:
-
-- If Telegram **refuses** a message because of an icon, it is sent again
-  immediately without icons, so no alert is ever lost.
-- If Telegram **accepts it but silently drops the icons** (the usual case
-  without Premium), the bot notices from Telegram's reply. After two in a row
-  it switches icons off, saves that, and tells you once.
-- Everything falls back to the old look: coloured dots, `🗑`/`⭐` button prefixes,
-  no row icons. Layout and behaviour are identical.
-
-| command | |
-|---|---|
-| `/icons` | show whether icons are on |
-| `/icons on` | turn them on (and test it: if Telegram strips them, it turns them off again and says why) |
-| `/icons off` | turn them off |
-
-`CUSTOM_EMOJI=false` in `.env` sets the default. After getting Premium, send
-`/icons on`. The channel post itself is never touched: icons only appear in
-messages the bot sends **to you**.
-
-To use another icon: add a line to `tools/gen_icon_data.py` and regenerate
-`icon_data.py` from the pack JSON; IDs are never typed by hand.
-
-## `.env`
+## .env
 
 | key | default | |
 |---|---|---|
-| `BOT_TOKEN` | — | from @BotFather |
-| `OWNER_ID` | — | your numeric id (@userinfobot) |
+| `API_ID` / `API_HASH` | — | from my.telegram.org |
+| `OWNER_ID` | — | your numeric id |
 | `POST_SLOTS` | `5` | link lines in the post |
-| `POST_TITLE` | `none` | bold line above the links (plain `.set` only); `none` = no title |
-| `CHECK_INTERVAL` | `300` | seconds between health checks |
-| `HTTP_TIMEOUT` | `20` | seconds to wait for Telegram before a request counts as timed out |
-| `API_ID` / `API_HASH` | — | optional, from my.telegram.org; lets `/login` skip straight to the phone number |
-| `REQUIRE_USERBOT` | `true` | pause monitoring until a user account is connected |
-| `DEATH_STRIKES` | `3` | failed checks in a row before a channel leaves the post |
-| `MIN_REQUEST_GAP` | `3` | minimum seconds between user-account requests |
-| `SYNC_INTERVAL` | `21600` | seconds between automatic searches for unknown channels (`0` = off; needs `/login`) |
-| `LINK_MODE` | `single` | `single` = every line shows the active channel, rest held in reserve · `spread` = rotate lines across the whole pool |
-| `AUTO_ADD` | `true` | auto-pool any channel the bot is promoted in |
-| `REPOST_IF_DELETED` | `false` | if the post is deleted: send a new one (`true`) or ask you to `.set` again (`false`) |
-| `CUSTOM_EMOJI` | `true` | use the Premium icon pack (needs the owner to have Telegram Premium; the bot turns it off by itself if Telegram doesn't show it) |
-| `EXPANDABLE_QUOTE` | `false` | collapsible quote box (plain `.set` only) |
-| `MIN_CHANNELS` | `1` | beg the owner below this many live channels |
+| `POST_TITLE` | `none` | bold line above the links; `none` = no title |
+| `CHECK_INTERVAL` | `300` | seconds between health rounds (and bio rewrites) |
+| `REQUEST_GAP` | `3` | minimum seconds between two channels in one round |
+| `DEATH_STRIKES` | `3` | failed rounds in a row before a channel leaves the post |
+| `SYNC_INTERVAL` | `21600` | seconds between automatic dialog scans (`0` = off) |
+| `REPOST_IF_DELETED` | `true` | automatically repost if the redirect post is deleted |
+| `SESSION_NAME` | `saviour` | Telethon session file name |
 
 State lives in `data.json`, logs in `bot.log`.
 
 ## Files
 
 ```
-setup.py      colorama installer / screen launcher
-bot.py        handlers, watchdog job, owner pings
-core.py       link parsing, admin checks, post rendering + editing
-template.py   clones a post's formatting and swaps only its links
-ui.py         owner notification cards
-icons.py      Premium icons: rendering, buttons, fallback to plain emoji
-icon_data.py  generated icon ids (tools/gen_icon_data.py)
-safebot.py    sends again without icons if Telegram refuses them
-menu.py       inline-button control panel
-userbot.py    optional user account (/login) that verifies links with Telegram
-storage.py    JSON state
-config.py     .env loader
+main.py     entry point: handlers (joins, promotions, .set, commands), loops
+core.py     pool, bio/invite probes, deep verify, post rendering
+storage.py  JSON state
+texts.py    random bios + owner message templates
+config.py   .env loader
 ```

@@ -1,571 +1,348 @@
-"""Channel resolving, invite-link handling and redirect-post rendering."""
+"""The working heart: channel pool, active liveness probes, invite links,
+and the redirect post.
+
+Everything runs through one user account, so a check is never a guess from a
+web page - the account simply tries to *do* something in the channel and
+watches whether Telegram lets it.
+"""
 
 import asyncio
-import html
 import logging
+import random
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Optional, Tuple
 
-import httpx
-from telegram import Bot, Message
-from telegram.constants import ChatMemberStatus, ParseMode
-from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter, TimedOut
+from telethon import TelegramClient, functions, types
+from telethon.errors import (
+    ChatAdminRequiredError,
+    FloodWaitError,
+    InviteHashExpiredError,
+    InviteHashInvalidError,
+    MessageIdInvalidError,
+    RPCError,
+    UserNotParticipantError,
+)
 
 import config
-import template
-import userbot
+import texts
 from storage import store
 
 log = logging.getLogger(__name__)
 
-TRANSIENT = (TimedOut, NetworkError, RetryAfter)
+INVITE_RE = re.compile(r"(?:t\.me/\+|t\.me/joinchat/)([\w-]+)")
+USERNAME_RE = re.compile(r"(?:^|t\.me/)(@?[A-Za-z][A-Za-z0-9_]{3,})\s*$")
 
-RETRY_ATTEMPTS = 3
-RETRY_BACKOFF = (2, 5)  # seconds to wait after attempt 1 and attempt 2
-
-
-def is_transient(exc: BaseException) -> bool:
-    """Network hiccup or flood limit - worth retrying. Real rejections are not.
-
-    BadRequest subclasses NetworkError in python-telegram-bot, so it has to be
-    ruled out explicitly or every rejection would look like a network error.
-    """
-    if isinstance(exc, (BadRequest, Forbidden)):
-        return False
-    return isinstance(exc, TRANSIENT)
+# Set by main once the account is known.
+client: TelegramClient = None  # type: ignore[assignment]
+ME_ID: int = 0
 
 
-async def with_retry(call, *args, what: str = "telegram call", **kwargs):
-    """Run ``await call(*args, **kwargs)``, retrying network hiccups.
-
-    Timeouts and connection drops are retried with a short backoff; flood
-    limits wait the time Telegram asks for. Anything else (BadRequest,
-    Forbidden...) is raised immediately. After the last attempt the transient
-    error is raised so the caller can decide what to do.
-    """
-    for attempt in range(1, RETRY_ATTEMPTS + 1):
-        try:
-            return await call(*args, **kwargs)
-        except Exception as exc:
-            if not is_transient(exc) or attempt == RETRY_ATTEMPTS:
-                raise
-            if isinstance(exc, RetryAfter):
-                wait = float(getattr(exc, "retry_after", 5) or 5) + 1
-            else:
-                wait = RETRY_BACKOFF[min(attempt - 1, len(RETRY_BACKOFF) - 1)]
-            log.warning("%s: %s (attempt %s/%s) - retrying in %ss",
-                        what, type(exc).__name__, attempt, RETRY_ATTEMPTS, wait)
-            await asyncio.sleep(wait)
-
-# @name | t.me/name | https://t.me/name | -1001234567890 | t.me/+hash | t.me/joinchat/hash
-_USERNAME_RE = re.compile(r"(?:https?://)?(?:t(?:elegram)?\.me|telegram\.dog)/([A-Za-z]\w{3,31})/?")
-_PRIVATE_RE = re.compile(r"(?:https?://)?(?:t(?:elegram)?\.me|telegram\.dog)/(?:\+|joinchat/)([\w-]+)/?")
-_AT_RE = re.compile(r"(?<![\w/])@([A-Za-z]\w{3,31})")
-_ID_RE = re.compile(r"(?<![\w.])(-100\d{5,})(?![\w.])")
+def bind(tg_client: TelegramClient, me_id: int) -> None:
+    global client, ME_ID
+    client, ME_ID = tg_client, me_id
 
 
-# --------------------------------------------------------------- parsing
-def parse_targets(text: str) -> Tuple[List[str], List[str]]:
-    """Split a blob of text into resolvable targets and unresolvable invite links.
-
-    The Bot API cannot turn a private ``t.me/+hash`` invite into a chat id, so
-    those are reported back to the owner with instructions instead.
-    """
-    text = text or ""
-    targets: List[str] = []
-    unresolvable: List[str] = []
-
-    for match in _PRIVATE_RE.finditer(text):
-        unresolvable.append(match.group(0))
-    text_wo_private = _PRIVATE_RE.sub(" ", text)
-
-    for match in _ID_RE.finditer(text_wo_private):
-        targets.append(match.group(1))
-    for match in _USERNAME_RE.finditer(text_wo_private):
-        targets.append("@" + match.group(1))
-    for match in _AT_RE.finditer(text_wo_private):
-        targets.append("@" + match.group(1))
-
-    seen, deduped = set(), []
-    for item in targets:
-        key = item.lower()
-        if key not in seen:
-            seen.add(key)
-            deduped.append(item)
-    return deduped, unresolvable
-
-
-def forwarded_channel_id(message: Message) -> Optional[int]:
-    """Channel id when the owner forwards a post from the channel instead."""
-    origin = getattr(message, "forward_origin", None)
-    chat = getattr(origin, "chat", None)
-    if chat is not None and getattr(chat, "type", "") == "channel":
-        return chat.id
-    return None
-
-
-# ------------------------------------------------------- channel checks
-async def bot_is_admin(bot: Bot, chat_id: Any) -> bool:
-    member = await bot.get_chat_member(chat_id, bot.id)
-    return member.status == ChatMemberStatus.ADMINISTRATOR
-
-
-async def fetch_invite_link(bot: Bot, chat_id: int, title: str) -> Tuple[Optional[str], str]:
-    """Prefer a public @username link, otherwise mint a fresh invite link.
-
-    Returns ``(link, "")`` on success or ``(None, reason)`` so the owner is
-    told *why* it failed instead of a generic message.
-    """
+# ------------------------------------------------------------------ helpers
+async def rpc(coro, what: str):
+    """Run one Telegram request, respecting flood-waits. Re-raises the rest."""
     try:
-        chat = await with_retry(bot.get_chat, chat_id, what=f"get_chat {chat_id}")
-        if chat.username:
-            return f"https://t.me/{chat.username}", ""
-        link = await with_retry(bot.create_chat_invite_link, chat_id,
-                                name=title[:32] or "redirect", what="create invite link")
-        return link.invite_link, ""
-    except (BadRequest, Forbidden) as exc:  # must come first: BadRequest is a NetworkError
-        log.warning("invite link failed for %s: %s", chat_id, exc)
-        raw = getattr(exc, "message", str(exc)) or str(exc)
-        if "not enough rights" in raw.lower() or "administrator" in raw.lower():
-            return None, "Missing Invite Users via Link permission"
-        return None, f"Telegram: {raw}"
-    except TRANSIENT as exc:
-        log.warning("invite link for %s still timing out after retries: %s", chat_id, exc)
-        return None, "Telegram did not respond in time (network timeout)"
+        return await coro
+    except FloodWaitError as exc:
+        log.warning("flood-wait %ss on %s - sleeping it off", exc.seconds, what)
+        await asyncio.sleep(exc.seconds + 1)
+        return await coro  # one retry; if it still fails the caller decides
+    except SlowModeWaitError as exc:
+        log.warning("slow-mode %ss on %s", exc.seconds, what)
+        await asyncio.sleep(exc.seconds + 1)
+        return await coro
 
 
-# Right the bot absolutely needs to serve links from a channel.
-LINK_RIGHT = ("can_invite_users", "Invite Users via Link")
-
-# Extra rights needed before a channel can host the ".set" redirect post.
-POST_RIGHTS = (
-    ("can_post_messages", "Post Messages"),
-    ("can_edit_messages", "Edit Messages"),
-    ("can_delete_messages", "Delete Messages"),
-)
+def invite_hash(link: str) -> Optional[str]:
+    match = INVITE_RE.search(link or "")
+    return match.group(1) if match else None
 
 
-def rights_report(member: Any) -> Dict[str, Any]:
-    """What can this admin membership actually do?"""
-    attr, label = LINK_RIGHT
-    can_link = bool(getattr(member, attr, False))
-    missing_post = [name for key, name in POST_RIGHTS if not getattr(member, key, False)]
-    return {
-        "can_link": can_link,
-        "missing_link": [] if can_link else [label],
-        "missing_post": missing_post,
-        "can_host_post": not missing_post,
-        "full": can_link and not missing_post,
-    }
+async def get_entity(chat_id: int):
+    return await rpc(client.get_entity(chat_id), f"get_entity {chat_id}")
 
 
-async def register_channel(bot: Bot, chat: Any, title: str) -> Dict[str, Any]:
-    """Mint a link and drop the channel into the pool. Returns a status dict."""
-    link, reason = await fetch_invite_link(bot, chat.id, title)
-    if not link:
-        return {"ok": False, "reason": reason}
-    is_new = store.add_channel(chat.id, title or str(chat.id), chat.username, link)
-    store.verified = True
-    if store.channels:
-        store.awaiting_links = False
-    await store.save()
-    return {"ok": True, "new": is_new, "link": link}
-
-
-async def connect_discovered(bot: Bot, found: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Connect channels found by the search, after the bot's own checks.
-
-    Each one must pass what a manual promotion would: the bot is an admin,
-    holds *Invite Users via Link*, and a working invite link can be made.
-    Returns lists of titles (and reasons) so the owner sees what happened.
-    """
-    result: Dict[str, Any] = {"added": [], "existing": [], "host": [],
-                              "need_permission": [], "failed": [], "stale": 0}
-    host = store.post["chat_id"] if store.post else None
-
-    def fail(item, title, reason):
-        # A chat remembered from long ago that no longer works (the bot was
-        # removed, the channel deleted) is not news - drop it quietly.
-        if item.get("seen"):
-            result["stale"] += 1
-        else:
-            result["failed"].append((title, reason))
-
-    for item in found:
-        cid, title = item["id"], item.get("title") or str(item["id"])
-        if cid == host:
-            result["host"].append(title)       # displays the post; never a target
-            continue
-        if store.get_channel(cid):
-            result["existing"].append(title)
-            continue
-        try:
-            member = await with_retry(bot.get_chat_member, cid, bot.id,
-                                      what=f"member {cid}")
-            chat = await with_retry(bot.get_chat, cid, what=f"get_chat {cid}")
-        except (BadRequest, Forbidden) as exc:
-            fail(item, title, f"Telegram: {getattr(exc, 'message', exc)}")
-            continue
-        except TRANSIENT:
-            result["failed"].append((title, "Telegram did not respond, try again"))
-            continue
-        if member.status != ChatMemberStatus.ADMINISTRATOR:
-            fail(item, title, "The bot is no longer admin there")
-            continue
-        if not rights_report(member)["can_link"]:
-            result["need_permission"].append(title)
-            continue
-        done = await register_channel(bot, chat, chat.title or title)
-        if done["ok"]:
-            result["added"].append(chat.title or title)
-        else:
-            result["failed"].append((title, done["reason"]))
-        await asyncio.sleep(0.3)               # gentle on the Bot API
-    return result
-
-
-async def sync_channels(bot: Bot) -> Dict[str, Any]:
-    """Find every channel the bot is admin in and connect the unknown ones.
-
-    With a user account connected, it searches all channels that account
-    administers. Without one it can only re-check the channels this bot has
-    already seen (a bot can't list its own channels).
-    """
-    report: Dict[str, Any] = {
-        "via": "none", "error": "", "scanned": 0, "found": 0, "partial": False,
-        "added": [], "existing": [], "host": [], "need_permission": [], "failed": [],
-        "seen_again": 0,
-    }
-    found: List[Dict[str, Any]] = []
-
-    if userbot.logged_in():
-        me = await with_retry(bot.get_me, what="get_me")
-        search = await userbot.find_bot_channels(me.username or "")
-        report.update(via="account", error=search["error"], scanned=search["scanned"],
-                      partial=search["partial"], found=len(search["found"]))
-        found = list(search["found"])
-    # Channels the bot has seen in earlier updates (even when it failed to add
-    # them then) are always re-checked: this is the only source without /login.
-    known = store.data.get("known_chats", {})
-    ids_found = {item["id"] for item in found}
-    for key, title in known.items():
-        if int(key) not in ids_found:
-            found.append({"id": int(key), "title": title, "username": None,
-                          "seen": True})
-            report["seen_again"] += 1
-    if report["via"] == "none":
-        report["via"] = "seen"
-
-    outcome = await connect_discovered(bot, found)
-    report.update(outcome)
-    if outcome["added"]:
-        store.verified = True
-        store.awaiting_links = False
-        await store.save()
-    return report
-
-
-async def verify_target(bot: Bot, target: Any) -> Dict[str, Any]:
-    """Resolve a target and confirm the bot is an admin there."""
-    result: Dict[str, Any] = {"target": str(target), "ok": False, "reason": "", "chat": None}
+async def my_rights(entity) -> Optional[object]:
+    """My admin rights in a channel, or None if they couldn't be read."""
     try:
-        chat_id: Any = int(target) if str(target).lstrip("-").isdigit() else target
-        chat = await bot.get_chat(chat_id)
-    except (BadRequest, Forbidden) as exc:
-        result["reason"] = f"Not reachable ({getattr(exc, 'message', exc)})"
-        return result
-
-    if chat.type != "channel":
-        result["reason"] = f"This is a {chat.type}, not a channel"
-        return result
-
-    try:
-        if not await bot_is_admin(bot, chat.id):
-            result["reason"] = "I'm not admin there"
-            return result
-    except (BadRequest, Forbidden) as exc:
-        result["reason"] = f"Admin check failed ({getattr(exc, 'message', exc)})"
-        return result
-
-    link, reason = await fetch_invite_link(bot, chat.id, chat.title or "")
-    if not link:
-        result["reason"] = reason
-        return result
-
-    result.update(ok=True, chat=chat, link=link)
-    return result
-
-
-async def is_channel_alive(bot: Bot, channel: Dict[str, Any]) -> bool:
-    """Bot API view only: does the chat exist and am I still admin there?
-
-    This is NOT enough on its own - a channel banned by Telegram or a revoked
-    invite can still look fine here. ``check_channel`` adds a real link check.
-    """
-    try:
-        await with_retry(bot.get_chat, channel["id"], what=f"get_chat {channel['id']}")
-        return await with_retry(bot_is_admin, bot, channel["id"],
-                                what=f"admin check {channel['id']}")
-    except (BadRequest, Forbidden) as exc:
-        log.info("channel %s looks dead: %s", channel["id"], exc)
-        return False
-    except TRANSIENT as exc:
-        log.warning("transient error checking %s: %s - keeping it", channel["id"], exc)
-        return True
-
-
-# ------------------------------------------------- real link checking
-# What a user sees when opening the link. A working channel link renders a
-# page with the channel title (tgme_page_title) and member count. A revoked
-# or expired invite, or a deleted/banned channel, renders a generic page
-# without a title; an unknown public username redirects to telegram.org.
-LINK_CHECK_UA = "Mozilla/5.0 (compatible; SaviourBot/1.0; +link-check)"
-CONTROL_URL = "https://t.me/telegram"  # always-live page, proves t.me is answering
-
-
-async def link_is_live(url: str) -> Optional[bool]:
-    """True = working link, False = dead link, None = couldn't tell."""
-    if not url.startswith("http"):
-        url = "https://" + url
-    try:
-        async with httpx.AsyncClient(timeout=config.HTTP_TIMEOUT, follow_redirects=False,
-                                     headers={"User-Agent": LINK_CHECK_UA}) as client:
-            resp = await client.get(url)
-    except httpx.HTTPError as exc:
-        log.warning("link check for %s failed to connect: %s", url, exc)
+        return await rpc(client.get_permissions(entity, "me"), "permissions")
+    except (UserNotParticipantError, ChatAdminRequiredError):
         return None
-    if resp.status_code in (301, 302, 303, 307, 308):
-        return False  # unknown username -> redirected to telegram.org
-    if resp.status_code != 200:
-        log.warning("link check for %s got HTTP %s", url, resp.status_code)
+
+
+# ------------------------------------------------------------ invite links
+async def invite_valid(link: str) -> Optional[bool]:
+    """True = works, False = Telegram says dead, None = couldn't tell."""
+    if not link:
+        return False
+    h = invite_hash(link)
+    if h is None:
+        # A public t.me/name link: resolve the username instead.
+        match = USERNAME_RE.search(link)
+        if not match:
+            return None
+        try:
+            entity = await rpc(client.get_entity(match.group(1).lstrip("@")),
+                                   f"resolve {link}")
+            return isinstance(entity, types.Channel)
+        except (ValueError, RPCError):
+            return None
+    try:
+        result = await rpc(
+            client(functions.messages.CheckChatInviteRequest(h)), f"check invite {h}")
+        # ChatInviteAlready / ChatInvite / ChatInvitePeek all mean: link valid.
+        return isinstance(
+            result, (types.ChatInviteAlready, types.ChatInvite, types.ChatInvitePeek))
+    except (InviteHashExpiredError, InviteHashInvalidError):
+        return False
+    except RPCError as exc:
+        log.warning("invite check of %s inconclusive: %s", link, exc)
         return None
-    return "tgme_page_title" in resp.text
 
 
-async def link_state(url: str) -> Tuple[Optional[bool], str, str]:
-    """Is this link alive? Returns (live, source, detail).
-
-    Only the logged-in user account may answer *dead*, because Telegram
-    itself tells it so. Reading the t.me page is unreliable - it reports live
-    channels as missing when t.me is rate limiting or slow - so a negative
-    web result is downgraded to "unknown". That stops false alarms from
-    eating the link pool.
-    """
-    if userbot.logged_in():
-        verdict, detail = await userbot.check_link(url)
-        if verdict is not None:
-            return verdict, "userbot", detail
-        log.info("userbot couldn't judge %s (%s)", url, detail)
-
-    live = await link_is_live(url)
-    if live is True:
-        return True, "web", ""
-    return None, "web", "t.me did not show the channel (not proof - needs /login)"
+async def mint_invite(entity, revoke_old: bool = False) -> Tuple[Optional[str], str]:
+    """Create (or, with revoke_old, replace) the channel's invite link."""
+    if not hasattr(entity, "broadcast"):
+        return None, "not a channel"
+    try:
+        result = await rpc(
+            client(functions.messages.ExportChatInviteRequest(
+                entity, legacy_revoke_permanent=revoke_old)),
+            f"export invite {getattr(entity, 'id', '?')}")
+    except ChatAdminRequiredError:
+        return None, 'missing the "Invite Users via Link" admin right'
+    except RPCError as exc:
+        return None, str(exc)
+    link = getattr(result, "link", None) or getattr(getattr(result, "invite", None), "link", None)
+    if not link:
+        return None, "Telegram returned no link"
+    return link, ""
 
 
-async def web_reachable() -> bool:
-    """Is t.me answering normally at all? Used to explain a bad web result."""
-    return await link_is_live(CONTROL_URL) is True
+# ------------------------------------------------------------- bio updates
+async def update_bio(entity) -> Tuple[bool, str]:
+    """Write a random line into the channel bio. This is both a feature (the
+    channel always looks fresh) and the main liveness probe."""
+    about = random.choice(texts.BIOS)[:255]
+    try:
+        # messages.editChatAbout takes an InputPeer and works for channels.
+        await rpc(client(functions.messages.EditChatAboutRequest(entity, about)),
+                  "edit bio")
+        return True, ""
+    except ChatAdminRequiredError:
+        return False, 'missing the "Change Info" admin right'
+    except RPCError as exc:
+        return False, str(exc)
 
 
-async def check_channel(bot: Bot, channel: Dict[str, Any]) -> Tuple[str, str]:
-    """Health check of one channel. Never decides a channel is dead by itself.
+# ------------------------------------------------------------- deep verify
+# Normal checks sometimes scream "deleted" when the channel is fine. Before
+# believing them, prove it with actions only a live channel allows.
+async def deep_verify(entity) -> Tuple[bool, str]:
+    if entity is None:
+        return False, "channel unreachable"
 
-    Returns ``(state, reason)``:
-      ok        verified working
-      relinked  invite had stopped working; a fresh, verified link was saved
+    # Probe 1: add a dot to the name and put it back.
+    try:
+        title = (getattr(entity, "title", "") or "")[:250]
+        if title:
+            await rpc(client(functions.channels.EditTitleRequest(entity, title + ".")),
+                      "rename probe (add)")
+            await asyncio.sleep(1)
+            await rpc(client(functions.channels.EditTitleRequest(entity, title)),
+                      "rename probe (revert)")
+            return True, "rename probe passed"
+    except RPCError as exc:
+        log.info("rename probe failed: %s", exc)
+
+    # Probe 2: post a silent message and delete it within a second.
+    try:
+        msg = await rpc(client.send_message(entity, ".", silent=True), "post probe")
+        await asyncio.sleep(1)
+        await rpc(client.delete_messages(entity, [msg.id]), "delete probe")
+        return True, "post/delete probe passed"
+    except RPCError as exc:
+        log.info("post/delete probe failed: %s", exc)
+
+    return False, "rename and post/delete probes both failed"
+
+
+# --------------------------------------------------------------- one round
+async def probe(channel: dict) -> Tuple[str, str]:
+    """Health check of one pool channel.
+
+    Returns (state, reason):
+      ok        verified working (bio rewritten if we have the right)
+      relinked  invite was dead; a fresh, verified link was saved
       suspect   looks dead *this round* - the caller counts strikes
       unknown   could not verify; change nothing
     """
     cid = channel["id"]
 
-    # 1. Bot API: chat exists and I'm still admin
+    # 1. Can the account still open the channel at all? If not, there is no
+    #    entity to probe with - this already smells like deleted or kicked.
     try:
-        await with_retry(bot.get_chat, cid, what=f"get_chat {cid}")
-        if not await with_retry(bot_is_admin, bot, cid, what=f"admin check {cid}"):
-            return "suspect", "Bot is no longer admin there"
-    except (BadRequest, Forbidden) as exc:
-        return "suspect", f"Channel unavailable ({getattr(exc, 'message', exc)})"
-    except TRANSIENT as exc:
-        log.warning("bot API check of %s inconclusive: %s", cid, exc)
-        return "unknown", "Telegram did not respond"
+        entity = await get_entity(cid)
+    except (ValueError, RPCError) as exc:
+        return "suspect", f"cannot open the channel ({exc})"
 
-    # 2. The invite link itself
-    live, source, detail = await link_state(channel["link"])
-    if live is True:
+    # 2. Still admin?
+    rights = await my_rights(entity)
+    if rights is None or not getattr(rights, "is_admin", False):
+        alive, detail = await deep_verify(entity)
+        if alive:
+            return "suspect", "no longer admin there"
+        return "suspect", f"no longer admin; {detail}"
+
+    # 3. Bio probe: rewrite the bio with a random line.
+    if getattr(rights, "change_info", False):
+        ok, why = await update_bio(entity)
+        if not ok:
+            alive, detail = await deep_verify(entity)
+            if not alive:
+                return "suspect", f"bio update failed ({why}); {detail}"
+            log.warning("bio update of %s failed but the channel is alive: %s", cid, why)
+
+    # 4. The invite link itself.
+    valid = await invite_valid(channel.get("link") or "")
+    if valid is True:
         return "ok", ""
-    if live is None:
-        return "unknown", detail or "Link check inconclusive"
+    if valid is None:
+        return "unknown", "invite check inconclusive"
 
-    # 3. Telegram says the link is dead, but the channel and my admin rights
-    #    are fine - so the invite was revoked. Mint a new one and verify it.
-    log.warning("invite %s for %s rejected by Telegram (%s) - creating a new one",
-                channel["link"], cid, detail)
-    new_link, reason = await fetch_invite_link(bot, cid, channel.get("title") or "")
-    if new_link and new_link != channel["link"]:
+    # Telegram says the invite is dead but the channel and my rights are fine
+    # -> the invite was revoked. Mint a fresh one and verify it before saving.
+    new_link, why = await mint_invite(entity, revoke_old=True)
+    if new_link:
         await asyncio.sleep(2)  # let Telegram register the new invite
-        fresh, _, _ = await link_state(new_link)
-        if fresh is True:
+        if await invite_valid(new_link) is True:
             channel["link"] = new_link
             await store.save()
-            return "relinked", detail or "Old invite link stopped working"
-        log.warning("replacement invite for %s did not verify either", cid)
-    return "suspect", detail or "Link no longer works"
+            return "relinked", "old invite stopped working"
+        return "unknown", "fresh invite could not be verified yet"
+
+    alive, detail = await deep_verify(entity)
+    if alive:
+        return "suspect", f"invite dead and no new one ({why})"
+    return "suspect", f"invite dead ({why}); {detail}"
 
 
-# ------------------------------------------------------- post rendering
-def assign_slots(slots: int) -> List[str]:
-    """Fill every slot from the pool so N lines always render.
+# ------------------------------------------------------------ channel pool
+async def connect_channel(entity) -> Tuple[bool, str]:
+    """Verify rights, mint an invite and add the channel to the pool.
 
-    ``single`` mode repeats the active channel's link on every line (the rest
-    of the pool is held in reserve); ``spread`` mode rotates through the pool.
+    Returns (added_or_refreshed, human_reason_on_failure).
     """
-    links = [c["link"] for c in store.online() if c.get("link")]
-    if not links:
-        return []
-    slots = max(slots, 1)
-    if config.LINK_MODE == "spread":
-        return [links[i % len(links)] for i in range(slots)]
-    return [links[0]] * slots
+    if not isinstance(entity, types.Channel) or not getattr(entity, "broadcast", False):
+        return False, "not a broadcast channel"
+    if store.post and entity.id == store.post["chat_id"]:
+        return False, "that channel hosts the redirect post"
+    chat_id = int(f"-100{entity.id}") if entity.id > 0 else entity.id
+    if store.get_channel(chat_id):
+        store.bring_online(chat_id)
+        await store.save()
+        return True, ""
+
+    rights = await my_rights(entity)
+    if rights is None or not getattr(rights, "is_admin", False):
+        return False, "the account is not admin there"
+    if not getattr(rights, "invite_users", False):
+        return False, 'missing the "Invite Users via Link" admin right'
+
+    link, why = await mint_invite(entity)
+    if not link:
+        return False, f"could not create an invite link ({why})"
+
+    username = getattr(entity, "username", None)
+    is_new = store.add_channel(chat_id, entity.title or "channel", username, link)
+    await store.save()
+    log.info("channel %s (%s) %s", entity.title, chat_id,
+             "added" if is_new else "refreshed")
+    return True, ""
 
 
-def render_post(links: List[str]) -> str:
-    """Default look, used only when there is no cloned post to copy."""
-    body = "\n".join(html.escape(link) for link in links)
-    tag = "blockquote expandable" if config.EXPANDABLE_QUOTE else "blockquote"
-    title = (config.POST_TITLE or "").strip()
-    head = f"<b>{html.escape(title)}</b>\n" if title and title.lower() != "none" else ""
-    return f"{head}<{tag}>{body}</blockquote>"
+async def sync_discovered() -> list:
+    """Walk the account's own dialogs - a userbot CAN list its channels, no
+    bot API needed - and connect every broadcast channel it admins."""
+    added, post_chat = [], store.post["chat_id"] if store.post else None
+    async for dialog in client.iter_dialogs():
+        entity = dialog.entity
+        if not isinstance(entity, types.Channel) or not getattr(entity, "broadcast", False):
+            continue
+        chat_id = int(f"-100{entity.id}")
+        if chat_id == post_chat or store.get_channel(chat_id):
+            continue
+        rights = await my_rights(entity)
+        await asyncio.sleep(config.REQUEST_GAP)
+        if rights is None or not getattr(rights, "is_admin", False):
+            continue
+        if not getattr(rights, "invite_users", False):
+            added.append(("needs-invite-right", entity))
+            continue
+        link, _ = await mint_invite(entity)
+        if not link:
+            continue
+        store.add_channel(chat_id, entity.title or "channel",
+                          getattr(entity, "username", None), link)
+        added.append(("added", entity))
+        await asyncio.sleep(config.REQUEST_GAP)
+    await store.save()
+    return added
 
 
-async def edit_post(bot: Bot, chat_id: int, message_id: int,
-                    links: List[str], tpl: Optional[Dict[str, Any]] = None) -> None:
-    """Write ``links`` into the post, keeping the cloned formatting if any."""
-    if tpl:
-        text, entities = template.render(tpl, links)
-        if tpl["kind"] == "caption":
-            await bot.edit_message_caption(
-                chat_id=chat_id, message_id=message_id,
-                caption=text, caption_entities=entities,
-            )
-        else:
-            await bot.edit_message_text(
-                chat_id=chat_id, message_id=message_id,
-                text=text, entities=entities, disable_web_page_preview=True,
-            )
-        return
-    await bot.edit_message_text(
-        chat_id=chat_id, message_id=message_id, text=render_post(links),
-        parse_mode=ParseMode.HTML, disable_web_page_preview=True,
-    )
+# ------------------------------------------------------------ redirect post
+def render_post_text() -> str:
+    active = store.active_channel()
+    lines = []
+    if config.POST_TITLE.strip().lower() not in ("", "none"):
+        lines.append(f"**{config.POST_TITLE.strip()}**")
+    if active:
+        lines.extend([active["link"]] * store.post_slots())
+    else:
+        lines.append("⏳ Redirecting…")
+    return "\n".join(lines)
 
 
-async def adopt_existing(bot: Bot, target: Message) -> Dict[str, Any]:
-    """Take over a post you replied ``.set`` to, keeping its exact formatting.
-
-    Its line count is whatever the post already has (5 links -> 5 slots).
-    """
-    tpl = template.snapshot(target)
-    if tpl is None:
-        return {"ok": False, "reason": "that message has no text or caption to edit"}
-    slots = template.slot_count(tpl)
-    if slots == 0:
-        return {"ok": False, "reason": "that post has no t.me links for me to swap"}
-    links = assign_slots(slots)
-    if not links:
-        return {"ok": False, "reason": "my link pool is empty"}
+async def create_post(chat_id: int, slots: int) -> Tuple[bool, str]:
+    """Post the redirect message in a channel and remember it."""
     try:
-        await with_retry(edit_post, bot, target.chat_id, target.message_id, links, tpl,
-                         what="adopt post")
-    except BadRequest as exc:
-        if "not modified" not in (exc.message or "").lower():
-            raise
-    store.set_post(target.chat_id, target.message_id, slots, tpl)
+        entity = await get_entity(chat_id)
+    except (ValueError, RPCError) as exc:
+        return False, f"cannot open the channel: {exc}"
+    rights = await my_rights(entity)
+    if rights is None or not getattr(rights, "is_admin", False) \
+            or not getattr(rights, "post_messages", False):
+        return False, "not admin with Post Messages right yet"
+    try:
+        msg = await rpc(client.send_message(entity, render_post_text()), "create post")
+    except RPCError as exc:
+        return False, str(exc)
+    store.set_post(chat_id, msg.id, slots)
     await store.save()
-    log.info("adopted existing post %s in %s (%s link slots, formatting cloned)",
-             target.message_id, target.chat_id, slots)
-    return {"ok": True, "slots": slots}
+    log.info("redirect post created in %s (message %s)", chat_id, msg.id)
+    return True, ""
 
 
-async def publish_post(bot: Bot, chat_id: int, slots: int) -> Optional[Message]:
-    links = assign_slots(slots)
-    if not links:
-        return None
-    message = await bot.send_message(
-        chat_id,
-        render_post(links),
-        parse_mode=ParseMode.HTML,
-        disable_web_page_preview=True,
-    )
-    store.set_post(chat_id, message.message_id, slots)
-    await store.save()
-    return message
-
-
-async def adopt_post(bot: Bot, chat_id: int, message_id: int, slots: int) -> bool:
-    """Turn an existing message (your ``.set``) into the redirect post.
-
-    Nothing new is sent - the message you typed is edited in place and becomes
-    the post the bot keeps alive from then on.
-    """
-    links = assign_slots(slots)
-    if not links:
-        return False
-    await with_retry(edit_post, bot, chat_id, message_id, links, what="adopt .set")
-    store.set_post(chat_id, message_id, slots)
-    await store.save()
-    log.info("adopted message %s in %s as the redirect post (%s lines)",
-             message_id, chat_id, len(links))
-    return True
-
-
-# Telegram's many ways of saying "that message doesn't exist any more".
-POST_GONE = (
-    "message to edit not found",
-    "message to be edited not found",
-    "message can't be edited",
-    "message_id_invalid",
-    "message id invalid",
-    "message identifier is not specified",
-)
-
-
-async def refresh_post(bot: Bot) -> str:
-    """Re-render the existing post in place. Returns a short status string."""
+async def refresh_post() -> str:
+    """Re-render the redirect post. Returns a short result for logs/alerts."""
     post = store.post
     if not post:
         return "no-post"
-
-    links = assign_slots(post.get("slots", config.POST_SLOTS))
-    if not links:
-        return "no-links"
-
+    text = render_post_text()
     try:
-        await with_retry(edit_post, bot, post["chat_id"], post["message_id"], links,
-                         post.get("template"), what="post edit")
-        return "edited"
-    except BadRequest as exc:
-        msg = (exc.message or "").lower()
-        if "not modified" in msg:
-            return "unchanged"
-        if any(marker in msg for marker in POST_GONE):
-            log.warning("redirect post %s in %s is gone (%s)",
-                        post["message_id"], post["chat_id"], exc)
-            chat_id, slots = post["chat_id"], post.get("slots", config.POST_SLOTS)
+        await rpc(client.edit_message(post["chat_id"], post["message_id"], text),
+                  "edit post")
+        return "updated"
+    except MessageIdInvalidError:
+        if not config.REPOST_IF_DELETED:
             store.clear_post()
             await store.save()
-            if config.REPOST_IF_DELETED:
-                new = await publish_post(bot, chat_id, slots)
-                return "reposted" if new else "no-links"
             return "post-gone"
-        log.error("edit failed: %s", exc)
-        return f"error: {exc.message}"
-    except Forbidden as exc:
-        log.error("lost access to the .set channel: %s", exc)
-        return f"error: {exc}"
-    except TRANSIENT as exc:
-        # Telegram didn't answer in time even after retries. The post is fine
-        # as far as we know - keep it and try again on the next check.
-        log.warning("post edit still failing after %s attempts (%s) - will retry "
-                    "on the next check", RETRY_ATTEMPTS, type(exc).__name__)
-        return "network-error"
+        ok, why = await create_post(post["chat_id"], post["slots"])
+        return "reposted" if ok else f"error:{why}"
+    except RPCError as exc:
+        return f"error:{exc}"
