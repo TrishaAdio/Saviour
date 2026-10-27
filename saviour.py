@@ -35,6 +35,7 @@ from telethon.tl import functions
 
 import config
 import engine
+import ui
 from engine import DEAD, OK, RELINKED, UNSURE
 from state import state
 
@@ -72,40 +73,63 @@ def only_one_copy():
 
 
 # ----------------------------------------------------------------- talking
-# Always plain text: channel titles and invite codes contain "_" and "*",
-# which Telegram's markdown would mangle or reject outright.
+# Every message is HTML built by ui.py, which escapes all outside values -
+# channel titles and invite codes contain "_", "*" and "<". A list of strings
+# is sent as several messages (long lists are split into pages).
+def _plain(text):
+    return ui.HTML.parse(text)[0].replace("\n", " | ")
+
+
 async def tell(text):
-    """Send the owner a message."""
-    try:
-        await tg.send_message(config.OWNER_ID, text, parse_mode=None,
-                              link_preview=False)
-    except (ValueError, RPCError, *engine.HICCUP) as exc:
-        log.warning("could not DM the owner (%s): %s", engine.brief(exc),
-                    text.replace("\n", " | "))
+    """Send the owner a message (or several, given a list)."""
+    for part in (text if isinstance(text, list) else [text]):
+        try:
+            await tg.send_message(config.OWNER_ID, part, parse_mode=ui.HTML,
+                                  link_preview=False)
+        except (ValueError, RPCError, *engine.HICCUP) as exc:
+            log.warning("could not DM the owner (%s): %s", engine.brief(exc),
+                        _plain(part))
 
 
 async def answer(event, text):
-    try:
-        return await event.reply(text, parse_mode=None, link_preview=False)
-    except (RPCError, *engine.HICCUP) as exc:
-        log.warning("could not reply: %s", engine.brief(exc))
+    sent = None
+    for part in (text if isinstance(text, list) else [text]):
+        try:
+            sent = await event.reply(part, parse_mode=ui.HTML, link_preview=False)
+        except (RPCError, *engine.HICCUP) as exc:
+            log.warning("could not reply: %s", engine.brief(exc))
+    return sent
 
 
 async def rewrite(message, text):
     if message is None:
         return
     try:
-        await message.edit(text, parse_mode=None, link_preview=False)
+        await message.edit(text, parse_mode=ui.HTML, link_preview=False)
     except (RPCError, *engine.HICCUP):
         pass
 
 
-def describe(channel):
-    mark = "🔴 offline" if channel.get("offline") else "🟢 online"
-    line = f"{mark}  {channel['title']}  ({channel['id']})"
-    if channel.get("offline") and channel.get("reason"):
-        line += f"\n        {channel['reason']}"
-    return line
+def synced_card(title, chat_id, channel, rights):
+    bio = ("on" if getattr(rights, "change_info", False)
+           else "off " + ui.i("(no Change Info right)"))
+    return ui.card("🟢", "Channel synced", [
+        ui.kv("Name", ui.esc(title)),
+        ui.kv("ID", ui.code(chat_id)),
+        ui.kv("Invite", ui.esc(channel["link"]) if channel else "?"),
+        ui.kv("Bio updates", bio),
+        ui.kv("Pool", f"{len(state.live())} live"),
+    ])
+
+
+def channel_list(title, channels, foot=None):
+    """A channel list as one message per page."""
+    active = (state.active_channel() or {}).get("id")
+    chunks = ui.pages(channels)
+    return [ui.card("📡", ui.page_title(title, n, len(chunks)),
+                    text=ui.quote([ui.channel_line(c, active) for c in chunk]),
+                    foot=foot if n == len(chunks) else None)
+            for n, chunk in enumerate(chunks, 1)]
 
 
 async def ask_for_links_if_empty():
@@ -114,10 +138,13 @@ async def ask_for_links_if_empty():
         if not state.d["begging"]:
             state.d["begging"] = True
             await state.save()
-            await tell("🆘 No working links left — the redirect post has nothing "
-                       "to point at.\n\nSend me channel links here (one per line: "
-                       "@name, t.me/name, a +invite or a -100 id) and I'll check "
-                       "and load them right away.")
+            await tell(ui.card(
+                "🆘", "No working links left",
+                text="The redirect post has nothing to point at.\n\n"
+                     "Send me channel links here, one per line:",
+                extra=[ui.quote([ui.code("@name"), ui.code("t.me/name"),
+                                 ui.code("t.me/+invite"), ui.code("-100…")])],
+                foot="I'll check them and load them right away."))
     elif state.live() and state.d["begging"]:
         state.d["begging"] = False
         await state.save()
@@ -138,8 +165,11 @@ async def try_post(chat_id, slots):
         state.drop(chat_id)
         await state.save()
         log.info("took %s out of the pool: it holds the post now", chat_id)
-    await tell(f"✅ The redirect post is up in {await name_of(chat_id)} ({chat_id})\n"
-               f"It shows {slots} link line(s) and will keep itself updated.")
+    await tell(ui.card("✅", "Redirect post is live", [
+        ui.kv("Channel", ui.esc(await name_of(chat_id))),
+        ui.kv("ID", ui.code(chat_id)),
+        ui.kv("Lines", str(slots)),
+    ], foot="It updates itself whenever the links change."))
     await engine.redraw_post()
     return True
 
@@ -174,9 +204,11 @@ async def on_set(event):
 
     if await try_post(chat_id, slots):
         return
-    await tell(f"⏳ I saw your .set in {await name_of(chat_id)} ({chat_id}) but I'm "
-               "not admin there yet.\nPromote me and the post goes up by itself — "
-               "I'll keep trying in the background.")
+    await tell(ui.card("⏳", "Waiting for admin rights", [
+        ui.kv("Channel", ui.esc(await name_of(chat_id))),
+        ui.kv("ID", ui.code(chat_id)),
+    ], text=f"I saw your {ui.code('.set')} but I'm not admin there yet.",
+        foot="Promote me and the post goes up by itself."))
 
 
 # --------------------------------------------------- promoted / demoted / joined
@@ -205,8 +237,11 @@ async def on_membership(update):
 
     # Joined, no rights yet: say so and wait. Nothing else happens.
     if joined and not promoted:
-        await tell(f"👀 I'm in {title} ({chat_id}) but not an admin.\n"
-                   "Promote me and I'll take it from there.")
+        await tell(ui.card("👀", "Joined a channel", [
+            ui.kv("Name", ui.esc(title)),
+            ui.kv("ID", ui.code(chat_id)),
+            ui.kv("Role", "member, not admin"),
+        ], foot="Promote me and I'll take it from there."))
         return
 
     if promoted:
@@ -224,19 +259,18 @@ async def on_membership(update):
             log.info("can't read rights in %s: %s", chat_id, engine.brief(exc))
             return
         if rights is not None and not getattr(rights, "invite_users", False):
-            await tell(f'🟠 {title} ({chat_id}) still needs the "Invite Users via '
-                       'Link" right.\nTick it and I\'ll add the channel on my own.')
+            await tell(ui.card("🟠", "One admin right missing", [
+                ui.kv("Name", ui.esc(title)),
+                ui.kv("ID", ui.code(chat_id)),
+                ui.kv("Needs", ui.b("Invite Users via Link")),
+            ], foot="Tick it and I'll add the channel on my own."))
             return
         added, why = await engine.adopt(entity)
         if not added:
             log.info("promotion in %s didn't pool it: %s", title, why)
             return
         channel = state.get(chat_id)
-        await tell(f"🟢 Channel synced: {title}\n"
-                   f"ID: {chat_id}\n"
-                   f"Invite: {channel['link'] if channel else '?'}\n"
-                   f"Bio updates: {'on' if getattr(rights, 'change_info', False) else 'off (no Change Info right)'}\n"
-                   f"Pool: {len(state.live())} live")
+        await tell(synced_card(title, chat_id, channel, rights))
         await ask_for_links_if_empty()
         await engine.redraw_post()
         return
@@ -245,15 +279,22 @@ async def on_membership(update):
         if state.post and state.post["chat"] == chat_id:
             state.forget_post()
             await state.save()
-            await tell(f"🔴 I lost my rights in {title} ({chat_id}), so the redirect "
-                       "post is gone.\nFix my rights and post .set there again.")
+            await tell(ui.card("🔴", "Redirect post lost", [
+                ui.kv("Channel", ui.esc(title)),
+                ui.kv("ID", ui.code(chat_id)),
+            ], text="I lost my admin rights there, so I can't keep the post.",
+                foot="Fix my rights and post .set there again."))
             return
         if state.get(chat_id):
             state.park(chat_id, "we were demoted")
             await state.save()
             result = await engine.redraw_post()
-            await tell(f"🔴 Demoted in {title} ({chat_id}) — parked it and updated "
-                       f"the post ({result}).\nRe-promote me and it comes back by itself.")
+            await tell(ui.card("🔴", "Demoted in a channel", [
+                ui.kv("Name", ui.esc(title)),
+                ui.kv("ID", ui.code(chat_id)),
+                ui.kv("Now", "parked, out of the post"),
+                ui.kv("Post", ui.post_result(result)),
+            ], foot="Re-promote me and it comes back by itself."))
             await ask_for_links_if_empty()
 
 
@@ -315,24 +356,38 @@ async def one_round():
              len(back), unclear, result)
 
     for channel in warned:
-        await tell(f"🟠 {channel['title']} failed a check "
-                   f"(1/{config.STRIKES}): {channel.get('reason')}\n"
-                   "Nothing has changed yet — I'm watching it.")
-    if parked:
-        await tell("🔴 Taken out of the post after "
-                   f"{config.STRIKES} failed checks in a row:\n"
-                   + "\n".join(f"• {c['title']} — {c.get('reason')}" for c in parked)
-                   + f"\n\nPool: {len(state.live())} live. They stay in my list and "
-                     "come back on their own if they recover.")
+        await tell(ui.card("🟠", "A channel failed a check", [
+            ui.kv("Name", ui.esc(channel["title"])),
+            ui.kv("ID", ui.code(channel["id"])),
+            ui.kv("Strike", f"1 / {config.STRIKES}"),
+            ui.kv("Why", ui.i(channel.get("reason") or "unknown")),
+        ], foot="Nothing has changed yet — I'm watching it."))
+    for chunk in ui.pages(parked):
+        if not chunk:
+            break
+        await tell(ui.card(
+            "🔴", "Taken out of the post",
+            text=f"These failed {config.STRIKES} checks in a row:",
+            extra=[ui.quote([ui.channel_line(c) for c in chunk]),
+                   ui.kv("Pool", f"{len(state.live())} live")],
+            foot="They stay in my list and come back on their own if they recover."))
     for channel in back:
-        await tell(f"🟢 {channel['title']} is working again — back in the post.")
+        await tell(ui.card("🟢", "Channel is back", [
+            ui.kv("Name", ui.esc(channel["title"])),
+            ui.kv("ID", ui.code(channel["id"])),
+        ], foot="It's working again and back in the post."))
     for channel, note in relinked:
-        await tell(f"🔁 {channel['title']} got a new invite link ({note}):\n"
-                   f"{channel['link']}")
+        await tell(ui.card("🔁", "New invite link", [
+            ui.kv("Name", ui.esc(channel["title"])),
+            ui.kv("Why", ui.i(note)),
+            ui.kv("Invite", ui.esc(channel["link"])),
+        ]))
     if result == "reposted":
-        await tell("♻️ The redirect post had been deleted, so I put a new one up.")
+        await tell(ui.card("♻️", "Redirect post replaced",
+                           text="It had been deleted, so I put a new one up."))
     elif result == "post-deleted":
-        await tell("🔴 The redirect post was deleted. Post .set again when ready.")
+        await tell(ui.card("🔴", "Redirect post deleted",
+                           foot="Post .set in the channel again when you're ready."))
 
     await ask_for_links_if_empty()
 
@@ -357,14 +412,13 @@ async def look_for_channels(quiet=False):
             cid = engine.peer(entity)
             channel = state.get(cid)
             rights = engine.cached_rights(entity)
-            await tell(f"🟢 Channel synced: {entity.title}\n"
-                       f"ID: {cid}\n"
-                       f"Invite: {channel['link'] if channel else '?'}\n"
-                       f"Bio updates: {'on' if getattr(rights, 'change_info', False) else 'off (no Change Info right)'}\n"
-                       f"Pool: {len(state.live())} live")
+            await tell(synced_card(entity.title, cid, channel, rights))
         for entity in nores:
-            await tell(f'🟠 {entity.title} ({engine.peer(entity)}) needs the '
-                       '"Invite Users via Link" right before I can use it.')
+            await tell(ui.card("🟠", "One admin right missing", [
+                ui.kv("Name", ui.esc(entity.title)),
+                ui.kv("ID", ui.code(engine.peer(entity))),
+                ui.kv("Needs", ui.b("Invite Users via Link")),
+            ], foot="Tick it and I'll add the channel on my own."))
     if fresh:
         await ask_for_links_if_empty()
         await engine.redraw_post()
@@ -412,97 +466,134 @@ def owner(func):
             await func(event)
         except Exception as exc:
             log.exception("/%s failed", func.__name__)
-            await answer(event, f"⚠️ That didn't work: {engine.brief(exc)}\n"
-                                "I'm still running.")
+            await answer(event, ui.card("⚠️", "That didn't work", [
+                ui.kv("Error", ui.i(engine.brief(exc)))],
+                foot="I'm still running."))
     return guard
 
 
 @owner
 async def cmd_help(event):
-    await answer(event,
-                 "Saviour — your commands (this chat only):\n\n"
-                 "/status      pool, post, last check\n"
-                 "/channels    list every channel I know\n"
-                 "/scan        check everything right now\n"
-                 "/find        look for channels I'm admin in\n"
-                 "/links       show every invite link\n"
-                 "/use <id>    show this channel in the post\n"
-                 "/slots <n>   how many link lines the post has\n"
-                 "/redraw      rewrite the post now\n"
-                 "/forget <id> drop a channel from my list\n"
-                 "/unset       forget the redirect post\n"
-                 ".clearall    wipe the account (asks first)\n\n"
-                 "In a channel: post .set (or .set 3) to claim the redirect post.\n"
-                 "Paste channel links here any time to add them.")
+    def row(cmd, what):
+        return f"{ui.code(cmd)} — {ui.esc(what)}"
 
-
-def when(ts):
-    if not ts:
-        return "never"
-    gap = max(int(time.time()) - ts, 0)
-    if gap < 60:
-        return f"{gap}s ago"
-    if gap < 3600:
-        return f"{gap // 60}m ago"
-    return f"{gap // 3600}h ago"
+    await answer(event, ui.card(
+        "🛟", "Saviour · commands",
+        extra=[
+            ui.b("Overview"),
+            ui.quote([row("/status", "pool, post and last check"),
+                      row("/channels", "every channel I know"),
+                      row("/links", "every invite link")]),
+            ui.b("Checks"),
+            ui.quote([row("/scan", "check everything right now"),
+                      row("/find", "look for channels I'm admin in")]),
+            ui.b("The post"),
+            ui.quote([row("/use <id>", "show this channel in the post"),
+                      row("/slots <n>", "how many link lines it has"),
+                      row("/redraw", "rewrite the post now"),
+                      row("/unset", "forget the redirect post")]),
+            ui.b("Cleanup"),
+            ui.quote([row("/forget <id>", "drop a channel from my list"),
+                      row(".clearall", "wipe the account (asks first)")]),
+            f"📌 In a channel, post {ui.code('.set')} (or {ui.code('.set 3')}) "
+            "to claim the redirect post.",
+        ],
+        foot="Paste channel links here any time to add them."))
 
 
 @owner
 async def cmd_status(event):
     post = state.post
-    lines = ["📊 Status",
-             f"Pool: {len(state.live())} live · {len(state.dead())} parked",
-             f"Post: {'channel ' + str(post['chat']) if post else 'not set'}"]
-    if not post and state.waiting_set:
-        lines.append(f"      waiting for admin rights in {state.waiting_set['chat']}")
-    lines += [f"Lines: {state.slots()}", f"Last check: {when(state.d.get('checked'))}"]
+    if post:
+        post_row = f"live in {ui.code(post['chat'])}"
+    elif state.waiting_set:
+        post_row = f"⏳ waiting for admin in {ui.code(state.waiting_set['chat'])}"
+    else:
+        post_row = "not set " + ui.i("(post .set in a channel)")
     chosen = state.active_channel()
-    if chosen:
-        lines.append(f"Showing: {chosen['title']}")
-    if state.channels:
-        lines += [""] + [describe(c) for c in state.channels]
-    await answer(event, "\n".join(lines))
+    rows = [
+        ui.kv("Pool", f"🟢 {len(state.live())} live · 🔴 {len(state.dead())} parked"),
+        ui.kv("Post", post_row),
+        ui.kv("Lines", str(state.slots())),
+        ui.kv("Showing", ui.esc(chosen["title"]) if chosen else "nothing"),
+        ui.kv("Last check", ui.when(state.d.get("checked"))),
+    ]
+    head = ui.card("📊", "Status", rows)
+    if not state.channels:
+        await answer(event, head + "\n" + ui.i("No channels yet — promote me in one."))
+        return
+    if len(state.channels) <= ui.PER_PAGE:
+        active = chosen["id"] if chosen else None
+        await answer(event, head + "\n" + ui.b("Channels") + "\n" + ui.quote(
+            [ui.channel_line(c, active) for c in state.channels], expandable=True))
+        return
+    await answer(event, [head] + channel_list("Channels", state.channels))
 
 
 @owner
 async def cmd_channels(event):
     if not state.channels:
-        await answer(event, "Nothing yet. Promote me in a channel and it shows up here.")
+        await answer(event, ui.card("📡", "Channels",
+                                    foot="Nothing yet. Promote me in a channel "
+                                         "and it shows up here."))
         return
-    await answer(event, "\n".join(describe(c) for c in state.channels))
+    await answer(event, channel_list(
+        f"Channels · {len(state.live())} live, {len(state.dead())} parked",
+        state.channels, foot="⭐ = shown in the post right now"))
 
 
 @owner
 async def cmd_links(event):
     if not state.channels:
-        await answer(event, "No channels yet.")
+        await answer(event, ui.card("⛓", "Invite links", foot="No channels yet."))
         return
-    await answer(event, "\n\n".join(
-        f"{c['title']} ({c['id']})\n{c['link']}" for c in state.channels))
+    chunks = ui.pages(state.channels, per=20)
+    await answer(event, [
+        ui.card("⛓", ui.page_title("Invite links", n, len(chunks)),
+                text="\n\n".join(ui.link_line(c) for c in chunk))
+        for n, chunk in enumerate(chunks, 1)])
 
 
 @owner
 async def cmd_scan(event):
     if _round.locked():
-        await answer(event, "A check is already running — hold on.")
+        await answer(event, ui.card("⏳", "A check is already running",
+                                    foot="Hold on, results come in a moment."))
         return
-    await answer(event, "🔍 Checking every channel now…")
+    note = await answer(event, ui.card(
+        "🔍", "Checking every channel…",
+        foot=f"{len(state.channels)} channel(s), about "
+             f"{len(state.channels) * config.GAP}s or more."))
     await round_now()
+    await rewrite(note, ui.card("✅", "Check finished"))
     await cmd_status(event)
 
 
 @owner
 async def cmd_find(event):
-    await answer(event, "🔎 Going through my chats…")
+    note = await answer(event, ui.card("🔎", "Going through my chats…"))
     fresh, nores = await look_for_channels(quiet=True)
-    lines = [f"🟢 Synced: {e.title}" for e in fresh]
-    lines += [f'🟠 Needs "Invite Users via Link": {e.title}' for e in nores]
-    await answer(event, "\n".join(lines) if lines else "Nothing new found.")
+    if not fresh and not nores:
+        await rewrite(note, ui.card("🔎", "Search finished",
+                                    foot="Nothing new found."))
+        return
+    blocks = []
+    if fresh:
+        blocks += [ui.b(f"🟢 Synced ({len(fresh)})"),
+                   ui.quote([f"{ui.esc(e.title)}  {ui.code(engine.peer(e))}"
+                             for e in fresh[:ui.PER_PAGE]])]
+    if nores:
+        blocks += [ui.b(f"🟠 Needs “Invite Users via Link” ({len(nores)})"),
+                   ui.quote([f"{ui.esc(e.title)}  {ui.code(engine.peer(e))}"
+                             for e in nores[:ui.PER_PAGE]])]
+    await rewrite(note, ui.card("🔎", "Search finished", extra=blocks,
+                                foot=f"Pool: {len(state.live())} live"))
 
 
 @owner
 async def cmd_redraw(event):
-    await answer(event, f"Post: {await engine.redraw_post()}")
+    await answer(event, ui.card("📝", "Redirect post", [
+        ui.kv("Result", ui.post_result(await engine.redraw_post()))]))
 
 
 @owner
@@ -510,42 +601,61 @@ async def cmd_unset(event):
     state.forget_post()
     state.waiting_set = None
     await state.save()
-    await answer(event, "Forgotten. Post .set in a channel to claim a new post.")
+    await answer(event, ui.card("🗑", "Redirect post forgotten",
+                                foot="Post .set in a channel to claim a new one."))
+
+
+def usage(cmd, now=None):
+    rows = [ui.kv("Usage", ui.code(cmd))]
+    if now is not None:
+        rows.append(ui.kv("Now", now))
+    return ui.card("ℹ️", "How to use it", rows)
+
+
+def not_listed(raw):
+    return ui.card("❌", "Not in my list", [ui.kv("ID", ui.code(raw))],
+                   foot="See /channels for the IDs I know.")
 
 
 @owner
 async def cmd_slots(event):
     raw = (event.pattern_match.group(1) or "").strip()
     if not raw:
-        await answer(event, f"Usage: /slots <1-20>   (now {state.slots()})")
+        await answer(event, usage("/slots <1-20>", str(state.slots())))
         return
     want = int(raw)
     if not 1 <= want <= 20:
-        await answer(event, "Pick a number between 1 and 20.")
+        await answer(event, ui.card("❌", "Out of range",
+                                    foot="Pick a number between 1 and 20."))
         return
     if state.post:
         state.post["slots"] = want
         await state.save()
-        await answer(event, f"{want} line(s). Post: {await engine.redraw_post()}")
+        await answer(event, ui.card("✅", "Lines changed", [
+            ui.kv("Lines", str(want)),
+            ui.kv("Post", ui.post_result(await engine.redraw_post()))]))
         return
     config.SLOTS = want
-    await answer(event, f"The next .set will use {want} line(s).")
+    await answer(event, ui.card("✅", "Lines changed", [ui.kv("Lines", str(want))],
+                                foot="The next .set will use this."))
 
 
 @owner
 async def cmd_forget(event):
     raw = (event.pattern_match.group(1) or "").strip()
     if not raw:
-        await answer(event, "Usage: /forget <-100 channel id>   (see /channels)")
+        await answer(event, usage("/forget <-100 channel id>"))
         return
     channel = state.get(int(raw))
     if not channel:
-        await answer(event, f"{raw} isn't in my list.")
+        await answer(event, not_listed(raw))
         return
     state.drop(int(raw))
     await state.save()
-    await answer(event, f"🗑 Dropped {channel['title']}. "
-                        f"Post: {await engine.redraw_post()}")
+    await answer(event, ui.card("🗑", "Channel dropped", [
+        ui.kv("Name", ui.esc(channel["title"])),
+        ui.kv("ID", ui.code(channel["id"])),
+        ui.kv("Post", ui.post_result(await engine.redraw_post()))]))
     await ask_for_links_if_empty()
 
 
@@ -554,43 +664,52 @@ async def cmd_use(event):
     raw = (event.pattern_match.group(1) or "").strip()
     if not raw:
         chosen = state.active_channel()
-        await answer(event, "Usage: /use <-100 channel id>   (now "
-                            f"{chosen['title'] if chosen else 'nothing'})")
+        await answer(event, usage("/use <-100 channel id>",
+                                  ui.esc(chosen["title"]) if chosen else "nothing"))
         return
     channel = state.get(int(raw))
     if not channel:
-        await answer(event, f"{raw} isn't in my list.")
+        await answer(event, not_listed(raw))
         return
     if channel.get("offline"):
-        await answer(event, f"{channel['title']} is parked — pick a live one, or "
-                            "/scan to re-check it.")
+        await answer(event, ui.card("🔴", "That channel is parked", [
+            ui.kv("Name", ui.esc(channel["title"])),
+            ui.kv("Why", ui.i(channel.get("reason") or "unknown"))],
+            foot="Pick a live one, or /scan to re-check it."))
         return
     state.d["active"] = int(raw)
     await state.save()
-    await answer(event, f"⭐ Showing {channel['title']}. "
-                        f"Post: {await engine.redraw_post()}")
+    await answer(event, ui.card("⭐", "Now showing", [
+        ui.kv("Name", ui.esc(channel["title"])),
+        ui.kv("ID", ui.code(channel["id"])),
+        ui.kv("Post", ui.post_result(await engine.redraw_post()))]))
 
 
 # ---------------------------------------------------------------- .clearall
 @owner
 async def cmd_clearall(event):
     if not event.pattern_match.group(1):
-        await answer(event,
-                     "🧨 .clearall empties this account completely:\n"
-                     "• deletes every group and channel it created\n"
-                     "• leaves every other group and channel, including the whole "
-                     "link pool and the redirect channel\n"
-                     "• blocks every private chat and wipes its history\n\n"
-                     "Only this chat and Saved Messages survive, and my link pool "
-                     "and post are reset.\n\nThere is no undo. "
-                     "Send  .clearall confirm  to go ahead.")
+        await answer(event, ui.card(
+            "🧨", "Wipe this account?",
+            text="This empties the account completely:",
+            extra=[ui.quote([
+                "🗑 deletes every group and channel it created",
+                "🚪 leaves every other group and channel — including the whole "
+                "link pool and the redirect channel",
+                "🚫 blocks every private chat and wipes its history"]),
+                "Only this chat and Saved Messages survive. "
+                "The link pool and the post are reset.",
+                f"⚠️ {ui.b('There is no undo.')} Send {ui.code('.clearall confirm')} "
+                "to go ahead."]))
         return
-    note = await answer(event, "🧨 Clearing the account… this can take a while.")
+    note = await answer(event, ui.card("🧨", "Clearing the account…",
+                                       foot="This can take a while."))
     tally = {"gone": 0, "left": 0, "blocked": 0, "failed": 0}
     try:
         chats = [d async for d in tg.iter_dialogs()]
     except (RPCError, *engine.HICCUP) as exc:
-        await rewrite(note, f"🧨 Couldn't list the chats: {engine.brief(exc)}")
+        await rewrite(note, ui.card("⚠️", "Couldn't list the chats", [
+            ui.kv("Error", ui.i(engine.brief(exc)))]))
         return
 
     for i, chat in enumerate(chats, 1):
@@ -631,7 +750,9 @@ async def cmd_clearall(event):
             log.warning("clearall failed on %s: %s", getattr(entity, "id", "?"),
                         engine.brief(exc))
         if i % 5 == 0:
-            await rewrite(note, f"🧨 Clearing… {i}/{len(chats)} chats done.")
+            await rewrite(note, ui.card("🧨", "Clearing the account…", [
+                ui.kv("Progress", f"{i} / {len(chats)} chats · "
+                                  f"{ui.progress(i, len(chats))}")]))
         await asyncio.sleep(config.GAP)
 
     state.d["channels"] = []
@@ -640,15 +761,15 @@ async def cmd_clearall(event):
     state.d["active"] = None
     state.d["begging"] = False
     await state.save()
-    await rewrite(note,
-                  "🧨 Done.\n"
-                  f"• Deleted (mine): {tally['gone']}\n"
-                  f"• Left: {tally['left']}\n"
-                  f"• Chats blocked and wiped: {tally['blocked']}\n"
-                  f"• Failed: {tally['failed']}\n\n"
-                  "My pool and post are reset. This chat and Saved Messages were "
-                  "kept on purpose — I'm still running, so add me to channels "
-                  "whenever you want to start again.")
+    await rewrite(note, ui.card("✅", "Account cleared", [
+        ui.kv("Deleted (mine)", str(tally["gone"])),
+        ui.kv("Left", str(tally["left"])),
+        ui.kv("Blocked and wiped", str(tally["blocked"])),
+        ui.kv("Failed", str(tally["failed"])),
+    ], text="My pool and post are reset. This chat and Saved Messages were kept "
+            "on purpose.",
+        foot="I'm still running — add me to channels whenever you want to "
+             "start again."))
 
 
 # -------------------------------------------------------- links pasted in DM
@@ -688,27 +809,40 @@ async def on_dm(event):
     if not lines:
         return                              # ordinary chat: stay quiet
 
+    lines = lines[:ui.PER_PAGE]               # one report message is enough
+    note = await answer(event, ui.card("🔎", f"Checking {len(lines)} link(s)…"))
     good, bad = [], []
     for line in lines:
         entity, why = await find_channel(line)
         if entity is None:
-            bad.append(f"❌ {line}: {why}")
+            bad.append(f"❌ {ui.code(line)}\n      ↳ {ui.i(why)}")
         else:
             added, why = await engine.adopt(entity)
             if added:
                 good.append(entity)
             else:
-                bad.append(f"❌ {getattr(entity, 'title', line)}: {why}")
+                bad.append(f"❌ {ui.b(getattr(entity, 'title', None) or line)}\n"
+                           f"      ↳ {ui.i(why)}")
         await asyncio.sleep(config.GAP)
 
-    report = [f"🟢 {e.title} — loaded" for e in good] + bad
+    blocks = []
     if good:
-        result = await engine.redraw_post()
-        report.append(f"Pool: {len(state.live())} live · Post: {result}")
+        blocks += [ui.b(f"🟢 Loaded ({len(good)})"),
+                   ui.quote([f"{ui.esc(e.title)}  {ui.code(engine.peer(e))}"
+                             for e in good])]
+    if bad:
+        blocks += [ui.b(f"❌ Not loaded ({len(bad)})"), ui.quote(bad)]
+    rows = []
+    foot = None
+    if good:
+        rows = [ui.kv("Pool", f"{len(state.live())} live"),
+                ui.kv("Post", ui.post_result(await engine.redraw_post()))]
         if not state.post and not state.waiting_set:
-            report.append("No redirect post yet — post .set in your public channel.")
+            foot = "No redirect post yet — post .set in your public channel."
+    icon = "✅" if good and not bad else "⚠️" if good else "❌"
+    await rewrite(note, ui.card(icon, "Links checked", rows, extra=blocks, foot=foot))
+    if good:
         await ask_for_links_if_empty()
-    await answer(event, "\n".join(report))
 
 
 # ------------------------------------------------------------------- start
@@ -770,10 +904,14 @@ async def start():
 
     asyncio.create_task(health_loop())
     asyncio.create_task(sync_loop())
-    await tell(f"✅ Saviour is up as @{me.username or me.id}\n"
-               f"Pool: {len(state.channels)} channel(s) · "
-               f"Post: {'set' if state.post else 'not set'}\n"
-               "Send /help for the command list.")
+    account = f"@{me.username}" if me.username else str(me.id)
+    await tell(ui.card("✅", "Saviour is online", [
+        ui.kv("Account", ui.esc(account)),
+        ui.kv("Pool", f"🟢 {len(state.live())} live · 🔴 {len(state.dead())} parked"),
+        ui.kv("Post", f"live in {ui.code(state.post['chat'])}" if state.post
+              else "not set"),
+        ui.kv("Checks", f"every {config.CHECK_EVERY // 60 or 1} min"),
+    ], foot="Send /help for the command list."))
     log.info("watching…")
     await tg.run_until_disconnected()
 

@@ -170,6 +170,7 @@ State lives in `data.json`, logs in `saviour.log`.
 ```
 saviour.py   the bot: events, commands, the check loop
 engine.py    all Telegram work: probes, bios, links, the post
+ui.py        how every message looks: cards, lists, escaping, paging
 state.py     the JSON file it remembers things in
 config.py    reads .env
 setup.py     the installer
