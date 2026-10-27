@@ -1,23 +1,22 @@
-"""Configuration loader. Values come from .env (create it from .env.example)."""
+"""Settings, read once from .env (written by setup.py)."""
 
 import os
 from pathlib import Path
 
 from dotenv import load_dotenv
 
-BASE_DIR = Path(__file__).resolve().parent
-load_dotenv(BASE_DIR / ".env")
+HERE = Path(__file__).resolve().parent
+load_dotenv(HERE / ".env")
 
 
-def _int(key: str, default: int) -> int:
-    raw = (os.getenv(key) or "").strip()
+def _int(key, default):
     try:
-        return int(raw)
-    except (TypeError, ValueError):
+        return int((os.getenv(key) or "").strip())
+    except ValueError:
         return default
 
 
-def _bool(key: str, default: bool) -> bool:
+def _bool(key, default):
     raw = (os.getenv(key) or "").strip().lower()
     if raw in ("1", "true", "yes", "y", "on"):
         return True
@@ -26,47 +25,31 @@ def _bool(key: str, default: bool) -> bool:
     return default
 
 
-# --- the userbot account (from https://my.telegram.org/apps) ----------------
+# --- the account (https://my.telegram.org/apps) ----------------------------
 API_ID = _int("API_ID", 0)
 API_HASH = (os.getenv("API_HASH") or "").strip()
+SESSION = (os.getenv("SESSION_NAME") or "saviour").strip()
 
-# Your main account. All notifications and the whole control chat live in the
-# DM between the userbot and this user. Only this user may give commands.
+# Your main account: every notification goes here and only it may command.
 OWNER_ID = _int("OWNER_ID", 0)
 
-# Telethon session file name (saviour.session next to this file).
-SESSION_NAME = (os.getenv("SESSION_NAME") or "saviour").strip()
+# --- the redirect post -----------------------------------------------------
+SLOTS = _int("POST_SLOTS", 5)                 # link lines in the post
+TITLE = (os.getenv("POST_TITLE") or "none").strip()   # "none" = no title line
 
-# How many link lines the redirect post contains.
-POST_SLOTS = _int("POST_SLOTS", 5)
+# --- timing ----------------------------------------------------------------
+CHECK_EVERY = _int("CHECK_EVERY", 300)        # seconds between health rounds
+SYNC_EVERY = _int("SYNC_EVERY", 900)          # seconds between dialog scans
+GAP = max(_int("GAP", 3), 1)                  # seconds between two channels
+MAX_WAIT = max(_int("MAX_WAIT", 300), 10)     # longest flood-wait to sit out
 
-# Optional bold line above the links. "none" or empty = no title.
-POST_TITLE = os.getenv("POST_TITLE", "none")
+# --- safety ----------------------------------------------------------------
+# Failed rounds in a row before a channel leaves the post. One bad answer is
+# never enough; anything unclear doesn't even count as a failure.
+STRIKES = max(_int("STRIKES", 3), 1)
 
-# Seconds between health-check rounds (each round also rewrites every bio).
-CHECK_INTERVAL = _int("CHECK_INTERVAL", 300)
+# If the redirect post gets deleted, put a fresh one up automatically.
+REPOST = _bool("REPOST_IF_DELETED", True)
 
-# Minimum seconds between two channels inside one round. Keeps the account
-# well inside Telegram's limits.
-REQUEST_GAP = max(_int("REQUEST_GAP", 3), 1)
-
-# Longest flood-wait the bot will sit out. Anything longer is reported as an
-# unverified round instead of freezing every check for an hour.
-MAX_FLOOD_WAIT = max(_int("MAX_FLOOD_WAIT", 300), 10)
-
-# How many failed rounds in a row before a channel leaves the post. One bad
-# answer is never enough.
-DEATH_STRIKES = max(_int("DEATH_STRIKES", 3), 1)
-
-# Seconds between automatic scans of the account's dialogs for channels where
-# it is admin but that are not in the pool yet. This is the safety net for a
-# promotion whose live update was missed (bot restarting), so it is kept
-# short - the scan reads admin rights straight from the dialog list and costs
-# one request per 100 chats. 0 turns it off.
-SYNC_INTERVAL = _int("SYNC_INTERVAL", 900)
-
-# If the redirect post itself gets deleted: post a fresh one automatically.
-REPOST_IF_DELETED = _bool("REPOST_IF_DELETED", True)
-
-DATA_FILE = BASE_DIR / "data.json"
-LOG_FILE = BASE_DIR / "bot.log"
+DATA = HERE / "data.json"
+LOG = HERE / "saviour.log"

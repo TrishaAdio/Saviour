@@ -1,8 +1,7 @@
-"""Interactive installer for Saviour.
+"""Installer for Saviour.
 
-Asks for everything the userbot needs (api credentials, phone, login code,
-2FA password, owner id), writes .env, performs the Telegram login so the
-session file is ready, and finishes with the command to start the bot.
+Asks for everything the account needs, logs it in to Telegram, writes .env
+and finishes with the command that starts the bot.
 
     python3 setup.py
 """
@@ -16,42 +15,37 @@ import subprocess
 import sys
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent
-REQUIREMENTS = BASE_DIR / "requirements.txt"
-ENV_FILE = BASE_DIR / ".env"
-VENV = BASE_DIR / "venv"
+HERE = Path(__file__).resolve().parent
+ENV = HERE / ".env"
+VENV = HERE / "venv"
 
 
-# --------------------------------------------------------------- bootstrap
-def ensure_dependencies() -> None:
-    """Install the pip packages; fall back to a local venv if the system
-    Python refuses them, restarting setup inside that venv."""
+def install_deps():
+    """Install the packages, falling back to a local venv if pip refuses."""
     missing = [m for m in ("telethon", "dotenv", "colorama")
                if importlib.util.find_spec(m) is None]
     if not missing:
         return
     print(f"Installing dependencies ({', '.join(missing)})…")
-    rc = subprocess.call(
-        [sys.executable, "-m", "pip", "install", "-r", str(REQUIREMENTS)])
-    if rc == 0:
+    if subprocess.call([sys.executable, "-m", "pip", "install", "-r",
+                        str(HERE / "requirements.txt")]) == 0:
         return
-
-    venv_python = VENV / "bin" / "python3"
-    if Path(sys.executable).resolve() == venv_python.resolve():
-        raise SystemExit("Could not install the dependencies even inside the "
-                         "venv - check your internet connection and pip output above.")
-    print("The system Python won't take packages - creating a local venv…")
-    if not venv_python.exists():
+    python = VENV / "bin" / "python3"
+    if Path(sys.executable).resolve() == python.resolve():
+        raise SystemExit("Couldn't install the dependencies even in the venv — "
+                         "check the pip output above.")
+    print("This Python won't take packages — making a local venv…")
+    if not python.exists():
         subprocess.check_call([sys.executable, "-m", "venv", str(VENV)])
     print("Restarting setup inside the venv…\n")
-    os.execv(str(venv_python), [str(venv_python), str(Path(__file__).resolve())])
+    os.execv(str(python), [str(python), str(Path(__file__).resolve())])
 
 
-ensure_dependencies()
+install_deps()
 
-from colorama import Fore, Style, init as colorama_init  # noqa: E402
+from colorama import Fore, Style, init  # noqa: E402
 
-colorama_init()
+init()
 
 BANNER = r"""
  .oooooo..o                      o8o
@@ -63,269 +57,243 @@ oo     .d8P d8(  888     `888'    888  888   888  888
 8""88888P'  `Y888""8o     `8'    o888o `Y8bod8P' d888b
 """
 
-C = Fore.CYAN + Style.BRIGHT
-G = Fore.GREEN + Style.BRIGHT
-Y = Fore.YELLOW + Style.BRIGHT
-R = Fore.RED + Style.BRIGHT
-W = Style.BRIGHT
-DIM = Style.DIM
-X = Style.RESET_ALL
+C, G, Y, R, W = (Fore.CYAN + Style.BRIGHT, Fore.GREEN + Style.BRIGHT,
+                 Fore.YELLOW + Style.BRIGHT, Fore.RED + Style.BRIGHT, Style.BRIGHT)
+DIM, X = Style.DIM, Style.RESET_ALL
 
 
-def step(text: str) -> None:
+def step(text):
     print(f"\n{C}▸{X} {W}{text}{X}")
 
 
-def ok(text: str) -> None:
+def good(text):
     print(f"  {G}✔{X} {text}")
 
 
-def warn(text: str) -> None:
+def warn(text):
     print(f"  {Y}!{X} {text}")
 
 
-def bad(text: str) -> None:
+def bad(text):
     print(f"  {R}✘{X} {text}")
 
 
-def hint(text: str) -> None:
+def hint(text):
     print(f"  {DIM}{text}{X}")
 
 
-def ask(prompt: str, default: str = "", secret: bool = False) -> str:
-    """One validated prompt. Ctrl+C / EOF exits cleanly."""
-    suffix = f" [{default}]" if default else ""
+def ask(prompt, default="", secret=False):
+    tail = f" [{default}]" if default else ""
     while True:
         try:
-            if secret:
-                raw = getpass.getpass(f"  {W}›{X} {prompt}{suffix}: ")
-            else:
-                raw = input(f"  {W}›{X} {prompt}{suffix}: ")
+            raw = (getpass.getpass(f"  {W}›{X} {prompt}{tail}: ") if secret
+                   else input(f"  {W}›{X} {prompt}{tail}: "))
         except (EOFError, KeyboardInterrupt):
             print(f"\n{R}Setup cancelled.{X}")
             raise SystemExit(1)
         value = raw.strip() or default
         if value:
             return value
-        bad("A value is required.")
+        bad("That can't be empty.")
 
 
-# ------------------------------------------------------------------- .env
-def existing_env() -> dict:
-    values = {}
-    if ENV_FILE.exists():
-        for line in ENV_FILE.read_text("utf-8").splitlines():
+def read_env():
+    out = {}
+    if ENV.exists():
+        for line in ENV.read_text("utf-8").splitlines():
             if "=" in line and not line.lstrip().startswith("#"):
-                key, _, val = line.partition("=")
-                values[key.strip()] = val.strip()
-    return values
+                key, _, value = line.partition("=")
+                out[key.strip()] = value.strip()
+    return out
 
 
-def write_env(values: dict) -> None:
-    lines = [
-        "# Written by setup.py - edit by hand or re-run setup.",
+def write_env(values):
+    ENV.write_text("\n".join([
+        "# Written by setup.py — edit by hand or run setup again.",
         f"API_ID={values['API_ID']}",
         f"API_HASH={values['API_HASH']}",
         f"OWNER_ID={values['OWNER_ID']}",
         f"POST_SLOTS={values['POST_SLOTS']}",
         "",
-        "# Optional overrides:",
-        "# POST_TITLE=none",
-        "# CHECK_INTERVAL=300",
-        "# REQUEST_GAP=3",
-        "# DEATH_STRIKES=3",
-        "# SYNC_INTERVAL=21600",
+        "# Optional:",
+        "# POST_TITLE=none        # bold line above the links; none = no title",
+        "# CHECK_EVERY=300        # seconds between health rounds",
+        "# SYNC_EVERY=900         # seconds between searches for new channels",
+        "# GAP=3                  # seconds between two channels in a round",
+        "# MAX_WAIT=300           # longest flood-wait to sit out",
+        "# STRIKES=3              # failed rounds before a channel leaves the post",
         "# REPOST_IF_DELETED=true",
         "# SESSION_NAME=saviour",
         "",
-    ]
-    ENV_FILE.write_text("\n".join(lines), "utf-8")
-    os.chmod(ENV_FILE, 0o600)
+    ]), "utf-8")
+    os.chmod(ENV, 0o600)
 
 
-# ------------------------------------------------------------------ login
-async def telegram_login(api_id: int, api_hash: str, session_path: Path) -> None:
-    """Full interactive Telegram login: phone -> code -> optional 2FA."""
-    from telethon import TelegramClient
-    from telethon.errors import (
-        FloodWaitError,
-        PasswordHashInvalidError,
-        PhoneCodeExpiredError,
-        PhoneCodeInvalidError,
-        PhoneNumberInvalidError,
-        SessionPasswordNeededError,
-    )
+async def sign_in(api_id, api_hash, session):
+    """Phone → code → 2FA, then find out who the owner is."""
+    from telethon import TelegramClient, types
+    from telethon.errors import (FloodWaitError, PasswordHashInvalidError,
+                                 PhoneCodeExpiredError, PhoneCodeInvalidError,
+                                 PhoneNumberInvalidError, SessionPasswordNeededError)
 
-    client = TelegramClient(str(session_path), api_id, api_hash)
+    client = TelegramClient(str(session), api_id, api_hash)
     try:
         await client.connect()
     except (ConnectionError, OSError) as exc:
-        bad(f"Could not reach Telegram: {exc}")
-        hint("Check the internet connection and re-run setup.")
+        bad(f"Couldn't reach Telegram: {exc}")
         raise SystemExit(1)
 
     if await client.is_user_authorized():
         me = await client.get_me()
-        ok(f"Session already logged in as @{me.username or me.id} - skipping login.")
+        good(f"Already signed in as @{me.username or me.id} — skipping the login.")
     else:
-        step("Phone number (the account that will BE the userbot)")
-        hint("Use a spare account if you can - the session is full access.")
+        step("The account that will BE the bot")
+        hint("Use a spare account if you can: the session is full access.")
         while True:
-            phone = ask("Phone, with country code (e.g. +15551234567)")
-            phone = re.sub(r"[\s\-()]", "", phone)
-            if not phone.startswith("+"):
-                phone = "+" + phone
+            phone = re.sub(r"[\s\-()]", "", ask("Phone number with country code"))
+            phone = phone if phone.startswith("+") else "+" + phone
             if not re.fullmatch(r"\+\d{7,15}", phone):
-                bad("That doesn't look like a phone number - digits only, with country code.")
+                bad("That doesn't look like a phone number.")
                 continue
             try:
                 sent = await client.send_code_request(phone)
                 break
             except PhoneNumberInvalidError:
-                bad("Telegram says that number is invalid - check it.")
+                bad("Telegram says that number is invalid.")
             except FloodWaitError as exc:
-                bad(f"Telegram asks to wait {exc.seconds}s before trying again.")
+                bad(f"Telegram wants you to wait {exc.seconds}s first.")
                 raise SystemExit(1)
-        ok(f"Code sent to {phone} (check Telegram, not SMS).")
+        good(f"Code sent to {phone} — look in Telegram, not SMS.")
 
         while True:
-            code = ask("Login code")
-            code = re.sub(r"[\s\-]", "", code)
+            code = re.sub(r"[\s\-]", "", ask("Login code"))
             try:
-                await client.sign_in(phone, code,
-                                     phone_code_hash=sent.phone_code_hash)
+                await client.sign_in(phone, code, phone_code_hash=sent.phone_code_hash)
                 break
             except PhoneCodeInvalidError:
-                bad("Wrong code - try again.")
+                bad("Wrong code — try again.")
             except PhoneCodeExpiredError:
-                bad("That code expired. Re-run setup to get a new one.")
+                bad("That code expired. Run setup again for a fresh one.")
                 raise SystemExit(1)
             except SessionPasswordNeededError:
-                step("Two-step verification is on - password needed")
+                step("Two-step verification is on")
                 while True:
-                    password = ask("2FA password", secret=True)
                     try:
-                        await client.sign_in(password=password)
+                        await client.sign_in(password=ask("2FA password", secret=True))
                         break
                     except PasswordHashInvalidError:
-                        bad("Wrong password - try again.")
+                        bad("Wrong password — try again.")
                 break
             except FloodWaitError as exc:
-                bad(f"Telegram asks to wait {exc.seconds}s before trying again.")
+                bad(f"Telegram wants you to wait {exc.seconds}s first.")
                 raise SystemExit(1)
-
         me = await client.get_me()
-        ok(f"Logged in as @{me.username or me.id} ({me.first_name or ''})")
+        good(f"Signed in as @{me.username or me.id}")
 
-    # Make sure only this user can read the session file.
-    for suffix in ("", "-journal"):
-        f = session_path.with_suffix(f".session{suffix}")
+    for extra in ("", "-journal"):
+        f = session.with_suffix(f".session{extra}")
         if f.exists():
             os.chmod(f, 0o600)
 
-    # ------------------------------------------------ owner id + test DM
-    step("Owner - your main account (gets every notification)")
-    hint("Numeric id from @userinfobot, or your @username.")
-    from telethon import types
-
-    env = existing_env()
-    owner = None
+    step("You — the account that gets every notification")
+    hint("Your numeric id (ask @userinfobot) or your @username.")
+    hint("It must be a different account from the one above.")
+    saved, owner = read_env(), None
     while owner is None:
-        raw = ask("Owner id or @username", default=env.get("OWNER_ID", ""))
+        raw = ask("Your id or @username", default=saved.get("OWNER_ID", ""))
         try:
             if raw.lstrip("-").isdigit():
                 owner = int(raw)
                 try:
                     await client.get_entity(owner)
                 except ValueError:
-                    warn("Can't see that user yet - keeping the id anyway.")
-                    hint("After starting the bot, send /start to it once from that account.")
+                    warn("I can't see that account yet — keeping the id anyway.")
+                    hint("Message the bot account once from it after starting.")
             else:
-                entity = await client.get_entity(raw.lstrip("@"))
-                if not isinstance(entity, types.User):
-                    bad("That's a channel/group - the owner must be a user account.")
+                found = await client.get_entity(raw.lstrip("@"))
+                if not isinstance(found, types.User):
+                    bad("That's a chat, not a person.")
                     continue
-                owner = entity.id
+                owner = found.id
         except ValueError:
-            bad("Could not find that user - check the username/id.")
-        except Exception as exc:  # flood etc.
+            bad("Couldn't find that account.")
+        except Exception as exc:
             bad(f"Lookup failed: {exc}")
 
+    if owner == (await client.get_me()).id:
+        warn("That's the bot's own account. Notifications will land in Saved "
+             "Messages and pasted links won't work.")
     try:
-        entity = await client.get_entity(owner)
-        await client.send_message(entity, "👋 Saviour setup complete - this chat is my command channel.")
-        ok("Test message sent to the owner - the DM channel works.")
+        await client.send_message(await client.get_entity(owner),
+                                  "👋 Saviour setup finished — this chat is where "
+                                  "I'll report in.")
+        good("Test message delivered — the notification chat works.")
     except Exception:
-        warn("Could not message the owner yet.")
-        hint("Open a DM with the userbot account from your main account and send /start once.")
+        warn("Couldn't message you yet.")
+        hint("Open a chat with the bot account from your own and say hi once.")
 
     await client.disconnect()
     return owner
 
 
-# -------------------------------------------------------------------- main
-def main() -> None:
+def main():
     print(f"{C}{BANNER}{X}")
     print(f"{W}  Saviour setup{X} {DIM}· redirect userbot installer{X}")
-    print(f"{DIM}  Ctrl+C at any prompt cancels safely.{X}")
+    print(f"{DIM}  Ctrl+C at any question cancels safely.{X}")
 
     step("Checking Python")
     if sys.version_info < (3, 8):
-        bad(f"Python {sys.version.split()[0]} is too old - need 3.8+.")
+        bad(f"Python {sys.version.split()[0]} is too old — 3.8 or newer, please.")
         raise SystemExit(1)
-    ok(f"Python {sys.version.split()[0]}")
+    good(f"Python {sys.version.split()[0]}")
 
-    env = existing_env()
-    if ENV_FILE.exists():
-        warn("An existing .env was found - its values are the defaults below.")
+    saved = read_env()
+    if ENV.exists():
+        warn("Found an existing .env — its values are the defaults below.")
 
     step("API credentials")
     hint("https://my.telegram.org/apps → API development tools")
     api_id = ""
     while not api_id.isdigit():
-        api_id = ask("API_ID", default=env.get("API_ID", ""))
+        api_id = ask("API_ID", default=saved.get("API_ID", ""))
         if not api_id.isdigit():
             bad("API_ID is a number.")
     api_hash = ""
     while not re.fullmatch(r"[0-9a-f]{32}", api_hash):
-        api_hash = ask("API_HASH", default=env.get("API_HASH", ""))
+        api_hash = ask("API_HASH", default=saved.get("API_HASH", ""))
         if not re.fullmatch(r"[0-9a-f]{32}", api_hash):
-            bad("API_HASH is 32 hex characters - copy it exactly.")
+            bad("API_HASH is 32 characters of lowercase hex.")
 
-    step("Redirect post")
-    slots = ask("Link lines in the post (POST_SLOTS)",
-                default=env.get("POST_SLOTS", "5"))
+    step("The redirect post")
+    slots = ask("How many link lines should it have?",
+                default=saved.get("POST_SLOTS", "5"))
     if not slots.isdigit() or not 1 <= int(slots) <= 20:
-        warn("Invalid number - using 5.")
+        warn("Not a number between 1 and 20 — using 5.")
         slots = "5"
 
-    # ---------------------------------------------------------------- login
-    import config  # safe now: .env may not exist yet, defaults are fine
-    session_path = BASE_DIR / (env.get("SESSION_NAME") or config.SESSION_NAME)
-    owner = asyncio.run(telegram_login(int(api_id), api_hash, session_path))
+    import config
+    session = HERE / (saved.get("SESSION_NAME") or config.SESSION)
+    owner = asyncio.run(sign_in(int(api_id), api_hash, session))
 
     write_env({"API_ID": api_id, "API_HASH": api_hash,
                "OWNER_ID": str(owner), "POST_SLOTS": slots})
-    ok(f".env written (owner-only permissions): {ENV_FILE}")
+    good(f".env written, readable only by you: {ENV}")
 
-    # -------------------------------------------------------------- done
-    venv_python = VENV / "bin" / "python3"
-    runner = "venv/bin/python3" if venv_python.exists() else "python3"
-
-    print(f"\n{G}{'─' * 56}{X}")
-    print(f"{G}{Style.BRIGHT}  🎉 Setup complete!{X}\n")
-    print(f"  {W}Start the bot:{X}")
-    print(f"    {C}{runner} main.py{X}\n")
-    print(f"  {W}Keep it running across reboots:{X}")
+    runner = "venv/bin/python3" if (VENV / "bin" / "python3").exists() else "python3"
+    print(f"\n{G}{'─' * 58}{X}")
+    print(f"{G}{W}  🎉 All set!{X}\n")
+    print(f"  {W}Start it:{X}")
+    print(f"    {C}{runner} saviour.py{X}\n")
+    print(f"  {W}Keep it alive across reboots:{X}")
     print(f"    {DIM}cp saviour.service /etc/systemd/system/")
     print(f"    systemctl daemon-reload && systemctl enable --now saviour{X}\n")
-    print(f"  {W}Then:{X}")
-    print(f"    1. Add the userbot account to a backup channel and promote it")
-    print(f"       → you get 🟢 Channel synced")
-    print(f"    2. Add it to the redirect channel, post {W}.set{X} there")
-    print(f"       (it waits for admin if it has to, then posts by itself)")
-    print(f"    3. Commands live in the DM with the userbot: /status /sync /scan …")
-    print(f"{G}{'─' * 56}{X}\n")
+    print(f"  {W}Then, in Telegram:{X}")
+    print("    1. Add this account to a backup channel and promote it to admin")
+    print(f"       {DIM}→ you get \"🟢 Channel synced\"{X}")
+    print(f"    2. Add it to your public channel and post {W}.set{X} there")
+    print(f"       {DIM}→ not admin yet? it waits, then posts the moment you promote it{X}")
+    print(f"    3. Talk to it in your own chat: {W}/status{X}, {W}/scan{X}, {W}/help{X}")
+    print(f"{G}{'─' * 58}{X}\n")
 
 
 if __name__ == "__main__":
