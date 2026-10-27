@@ -11,15 +11,21 @@ import config
 log = logging.getLogger(__name__)
 
 _DEFAULT: Dict[str, Any] = {
-    # verified channels the bot is admin in -> link pool
-    # {"id": -100.., "title": str, "username": str|None, "link": str}
+    # channels the account is admin in -> link pool
+    # {"id": -100.., "title": str, "username": str|None, "link": str,
+    #  "offline": bool, "strikes": int, "reason": str?}
     "channels": [],
-    # the ".set" channel where the redirect post lives
+    # the channel where the redirect post lives
     # {"chat_id": int, "message_id": int, "slots": int}
     "post": None,
-    "verified": False,
+    # a ".set" seen while the account was not admin yet
+    # {"chat_id": int, "slots": int}
+    "pending_set": None,
+    # channel shown on every line of the post (None = first online)
+    "active_id": None,
     # True while the bot waits for the owner to hand over fresh links
     "awaiting_links": False,
+    "last_check": 0,
 }
 
 
@@ -63,10 +69,8 @@ class Storage:
         """Returns True when newly added, False when it was only refreshed."""
         existing = self.get_channel(chat_id)
         if existing:
-            existing.update(title=title, username=username, link=link,
-                            offline=False, strikes=0)
-            existing.pop("offline_since", None)
-            existing.pop("reason", None)
+            existing.update(title=title, username=username, link=link)
+            self.bring_online(chat_id)
             return False
         self.channels.append(
             {"id": chat_id, "title": title, "username": username, "link": link,
@@ -76,10 +80,12 @@ class Storage:
 
     def remove_channel(self, chat_id: int) -> None:
         self.data["channels"] = [c for c in self.channels if c["id"] != chat_id]
+        if self.data.get("active_id") == chat_id:
+            self.data["active_id"] = None
 
     # --------------------------------------------- online / offline
-    # A channel is never deleted just because a check failed: it is parked
-    # as "offline", kept in the file and re-checked every round, so a wrong
+    # A channel is never deleted just because a check failed: it is parked as
+    # "offline", kept in the file and re-checked every round, so a wrong
     # verdict repairs itself and the pool can't be burned through.
     def online(self) -> List[Dict[str, Any]]:
         return [c for c in self.channels if not c.get("offline")]
@@ -94,6 +100,8 @@ class Storage:
         channel["offline"] = True
         channel["reason"] = reason
         channel.setdefault("offline_since", int(time.time()))
+        if self.data.get("active_id") == chat_id:
+            self.data["active_id"] = None
 
     def bring_online(self, chat_id: int) -> None:
         channel = self.get_channel(chat_id)
@@ -104,33 +112,46 @@ class Storage:
         channel.pop("offline_since", None)
         channel.pop("reason", None)
 
+    def active_channel(self) -> Optional[Dict[str, Any]]:
+        """The channel whose link fills the post."""
+        active = self.get_channel(self.data.get("active_id") or 0)
+        if active and not active.get("offline"):
+            return active
+        online = self.online()
+        if online:
+            self.data["active_id"] = online[0]["id"]
+            return online[0]
+        return None
+
     # ------------------------------------------------------------- post
     @property
     def post(self) -> Optional[Dict[str, Any]]:
         return self.data["post"]
 
-    def set_post(self, chat_id: int, message_id: int, slots: int,
-                 template: Optional[Dict[str, Any]] = None) -> None:
+    def set_post(self, chat_id: int, message_id: int, slots: int) -> None:
         self.data["post"] = {"chat_id": chat_id, "message_id": message_id, "slots": slots}
-        if template:
-            # snapshot of the original post's text + entities (see template.py)
-            self.data["post"]["template"] = template
+        self.data["pending_set"] = None
 
     def clear_post(self) -> None:
         self.data["post"] = None
 
+    def post_slots(self) -> int:
+        post = self.data.get("post") or {}
+        return int(post.get("slots") or config.POST_SLOTS)
+
+    # ------------------------------------------------------ pending .set
+    @property
+    def pending_set(self) -> Optional[Dict[str, Any]]:
+        return self.data.get("pending_set")
+
+    @pending_set.setter
+    def pending_set(self, value: Optional[Dict[str, Any]]) -> None:
+        self.data["pending_set"] = value
+
     # ------------------------------------------------------------ flags
     @property
-    def verified(self) -> bool:
-        return bool(self.data["verified"])
-
-    @verified.setter
-    def verified(self, value: bool) -> None:
-        self.data["verified"] = bool(value)
-
-    @property
     def awaiting_links(self) -> bool:
-        return bool(self.data["awaiting_links"])
+        return bool(self.data.get("awaiting_links"))
 
     @awaiting_links.setter
     def awaiting_links(self, value: bool) -> None:
