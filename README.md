@@ -86,21 +86,24 @@ If the **bio can't be written**, the channel gets a **brand new invite link**.
 If the **link itself is dead** but the channel is fine, the old invite was
 revoked — so a fresh one is made and *verified* before it's used.
 
-### 4. Nothing is believed without proof
-If anything suggests a channel is deleted, that is **never acted on
-directly**. The account first tries to:
+### 4. The "." test — settled on the spot
+When a check fails (Telegram won't open the channel, the bio can't be written,
+the link can't be renewed), the account doesn't wait for more rounds. It
+**posts a `.` in the channel right away**:
 
-1. **read the channel's full info** — needs no rights, changes nothing
-2. **add a `.` to its name** and take it straight back off
-3. **post a message and delete it** a second later
-
-Any one of those working means the channel is alive and the alarm was false.
+- **it posts** → deleted again at once. The channel is alive and it was a false alarm.
+- **Telegram refuses it, for any reason** → the channel is treated as deleted.
+  It leaves the post **immediately** and you get *🔴 Channel deleted — removed
+  from the post*.
+- **Telegram doesn't answer at all** (your server's connection) → nothing
+  changes; a network outage must not wipe the whole pool.
 
 ### 5. Why you can't lose a working channel
 - **Unclear is not dead.** A timeout, a server error, a flood-wait or a reply
   we can't read counts as *unsure* — no strike, no change.
-- **One bad round is never enough.** A channel must fail `STRIKES` rounds in
-  a row (default 3). Any success resets the count, and you get a 🟠 warning
+- **Strikes only for the rest.** Problems the `.` test can't settle (e.g. a
+  dead link without the invite right) still need `STRIKES` rounds in a row
+  (default 3). Any success resets the count, and you get a 🟠 warning
   on the very first failure.
 - **Nothing is ever deleted.** A channel that fails is *parked*: out of the
   post, still in the list, still checked every round. If it answers again it

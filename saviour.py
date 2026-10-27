@@ -36,7 +36,7 @@ from telethon.tl import functions
 import config
 import engine
 import ui
-from engine import DEAD, OK, RELINKED, UNSURE
+from engine import GONE_FOR_SURE, OK, RELINKED, UNSURE
 from state import state
 
 logging.basicConfig(
@@ -379,7 +379,7 @@ async def one_round():
         await ask_for_links_if_empty()
         return
 
-    parked, relinked, back, warned, unclear = [], [], [], [], 0
+    parked, gone, relinked, back, warned, unclear = [], [], [], [], [], 0
     for channel in list(state.channels):
         try:
             verdict, note = await engine.check(channel)
@@ -399,6 +399,14 @@ async def one_round():
         elif verdict == UNSURE:
             unclear += 1
             log.info("%s unverified this round: %s", channel["id"], note)
+        elif verdict == GONE_FOR_SURE:
+            # The dot test settled it: no strikes, no waiting.
+            channel["strikes"] = config.STRIKES
+            channel["reason"] = note
+            log.warning("%s is gone: %s", channel["id"], note)
+            if not was_off:
+                state.park(channel["id"], note)
+                gone.append(channel)
         else:                              # DEAD
             channel["strikes"] = int(channel.get("strikes", 0)) + 1
             channel["reason"] = note
@@ -417,9 +425,18 @@ async def one_round():
     result = await engine.redraw_post()
     log.info("round done: %s live, %s parked | newly parked %s, relinked %s, "
              "recovered %s, unverified %s | post %s",
-             len(state.live()), len(state.dead()), len(parked), len(relinked),
+             len(state.live()), len(state.dead()), len(parked) + len(gone), len(relinked),
              len(back), unclear, result)
 
+    for channel in gone:
+        await tell(ui.card("🔴", "Channel deleted — removed from the post", [
+            ui.kv("Name", ui.esc(channel["title"])),
+            ui.kv("ID", ui.code(channel["id"])),
+            ui.kv("Why", ui.i(channel.get("reason") or "unknown")),
+            ui.kv("Post", ui.post_result(result)),
+            ui.kv("Pool", f"{len(state.live())} live"),
+        ], foot="Kept in my list and re-tested every round — if it ever works "
+                "again it comes back by itself."))
     for channel in warned:
         await tell(ui.card("🟠", "A channel failed a check", [
             ui.kv("Name", ui.esc(channel["title"])),
