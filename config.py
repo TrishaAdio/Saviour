@@ -50,13 +50,20 @@ CHECK_INTERVAL = _int("CHECK_INTERVAL", 300)
 # well inside Telegram's limits.
 REQUEST_GAP = max(_int("REQUEST_GAP", 3), 1)
 
+# Longest flood-wait the bot will sit out. Anything longer is reported as an
+# unverified round instead of freezing every check for an hour.
+MAX_FLOOD_WAIT = max(_int("MAX_FLOOD_WAIT", 300), 10)
+
 # How many failed rounds in a row before a channel leaves the post. One bad
 # answer is never enough.
 DEATH_STRIKES = max(_int("DEATH_STRIKES", 3), 1)
 
 # Seconds between automatic scans of the account's dialogs for channels where
-# it is admin but that are not in the pool yet. 0 turns it off.
-SYNC_INTERVAL = _int("SYNC_INTERVAL", 21600)
+# it is admin but that are not in the pool yet. This is the safety net for a
+# promotion whose live update was missed (bot restarting), so it is kept
+# short - the scan reads admin rights straight from the dialog list and costs
+# one request per 100 chats. 0 turns it off.
+SYNC_INTERVAL = _int("SYNC_INTERVAL", 900)
 
 # If the redirect post itself gets deleted: post a fresh one automatically.
 REPOST_IF_DELETED = _bool("REPOST_IF_DELETED", True)
