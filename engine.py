@@ -49,8 +49,8 @@ DEAD = "dead"          # Telegram is definite, and the probes agree
 UNSURE = "unsure"      # no idea - change nothing
 GONE_FOR_SURE = "gone-for-sure"  # the dot test failed: out of the post right now
 
-# Random channel bios. Writing one is both a feature (the channel always
-# looks alive) and our main proof that we can still act in the channel.
+# Random channel bios. One is written only when a channel is about to fill
+# the post (test_takeover) - never in normal rounds.
 BIOS = [
     "🔥 Fresh content every day. Join before the link changes.",
     "⚡ The main channel moves often — stay close.",
@@ -237,7 +237,7 @@ async def rotate_link(channel, entity):
 
 # ---------------------------------------------------------------- the bio
 async def write_bio(channel, entity):
-    """Put a random line in the channel bio. Also our liveness probe."""
+    """Put a random line in the channel bio (only from test_takeover)."""
     pool = [b for b in BIOS if b != channel.get("last_bio")] or BIOS
     text = random.choice(pool)[:255]
     try:
@@ -251,6 +251,65 @@ async def write_bio(channel, entity):
         return False, brief(exc)
     channel["last_bio"] = text
     return True, ""
+
+
+async def rename_test(entity, title):
+    """Add a "." to the name and take it straight back off. (ok, why_not)."""
+    name = (title or getattr(entity, "title", "") or "")[:250]
+    if not name:
+        return False, "no name to test with"
+    try:
+        await call(lambda: tg(functions.channels.EditTitleRequest(entity, name + ".")),
+                   "rename test")
+    except ChatAdminRequiredError:
+        return False, 'missing the "Change Info" right'
+    except (RPCError, *HICCUP) as exc:
+        return False, brief(exc)
+    await asyncio.sleep(1)
+    try:
+        await call(lambda: tg(functions.channels.EditTitleRequest(entity, name)),
+                   "rename test undo")
+    except (RPCError, *HICCUP) as exc:
+        log.error("could not restore the name of %s - it may still end in a dot: %s",
+                  peer(entity), brief(exc))
+    return True, ""
+
+
+async def test_takeover(channel):
+    """Test a channel *before* it fills the post - only ever then.
+
+    Runs when the channel in the post was deleted and this one is next in
+    line: write a new bio and add/remove a "." in its name. Either working
+    proves we can act in it. If both fail, the "." post test decides.
+
+    Returns (usable, verdict, note). verdict is GONE_FOR_SURE when it is
+    gone too, so the caller parks it and moves on to the next one.
+    """
+    try:
+        entity = await entity_of(channel["id"])
+    except (*GONE, ValueError):
+        try:
+            entity = await tg.get_input_entity(channel["id"])
+        except ValueError:
+            entity = None
+    except (RPCError, *HICCUP) as exc:
+        return True, UNSURE, f"couldn't test it ({brief(exc)}) - using it anyway"
+
+    bio_ok, bio_why = (await write_bio(channel, entity)) if entity is not None \
+        else (False, "can't reach it")
+    name_ok, name_why = (await rename_test(entity, channel.get("title"))) \
+        if entity is not None else (False, "can't reach it")
+    if bio_ok or name_ok:
+        done = " and ".join(w for w, ok in (("bio changed", bio_ok),
+                                            ("name changed", name_ok)) if ok)
+        return True, OK, done
+    verdict, how = await _confirm(entity, f"bio ({bio_why}) and name ({name_why}) "
+                                          "changes both failed")
+    if verdict == GONE_FOR_SURE:
+        return False, verdict, how
+    if verdict == UNSURE:
+        return True, UNSURE, how
+    return True, OK, f"bio and name changes failed, but {how}"
 
 
 # ------------------------------------------------------------ the dot test
@@ -329,22 +388,11 @@ async def check(channel):
             return verdict, how
         return UNSURE, f"Telegram says I'm not admin, but {how}"
 
-    # 3. Write a random bio. If that fails, the dot test decides; a channel
-    #    that is alive gets a brand new link.
-    if getattr(rights, "change_info", False):
-        wrote, why = await write_bio(channel, entity)
-        if not wrote:
-            verdict, how = await _confirm(entity, f"the bio update failed ({why})")
-            if verdict:
-                return verdict, how
-            log.warning("bio update failed on %s but it is alive: %s", cid, why)
-            if getattr(rights, "invite_users", False):
-                fixed, detail = await rotate_link(channel, entity)
-                if fixed:
-                    return RELINKED, f"the bio update failed ({why}), so it got a new link"
-                return UNSURE, f"bio update failed ({why}); new link: {detail}"
+    # Nothing is written to the channel in a normal round: constant bio and
+    # name edits on healthy channels are what gets them flagged. Those are
+    # saved for test_takeover(), when a channel is about to fill the post.
 
-    # 4. Does the invite link still work?
+    # 3. Does the invite link still work?
     works = await link_works(channel.get("link") or "")
     if works is True:
         return OK, ""
