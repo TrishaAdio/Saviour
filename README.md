@@ -22,15 +22,30 @@ You add the account to your channels and promote it. It does the rest:
 ## Install
 
 ```bash
-python3 -m venv venv
-venv/bin/pip install -r requirements.txt
-cp .env.example .env      # fill in API_ID, API_HASH, OWNER_ID
-venv/bin/python3 main.py  # first run asks for phone + login code
+python3 setup.py
 ```
 
-- `API_ID` / `API_HASH`: [my.telegram.org](https://my.telegram.org/apps) →
+The installer checks Python, installs the dependencies (falling back to a
+local `venv/` if the system Python refuses them), then asks for:
+
+- **API_ID / API_HASH** — [my.telegram.org](https://my.telegram.org/apps) →
   *API development tools*
-- `OWNER_ID`: your main account's numeric id ([@userinfobot](https://t.me/userinfobot))
+- **POST_SLOTS** — link lines in the redirect post (default 5)
+- **Phone number** of the account that will *be* the userbot, then the
+  **login code** Telegram sends it, then the **2FA password** if the account
+  has two-step verification
+- **Owner** — your main account's numeric id or @username
+
+It writes `.env` (owner-only permissions), completes the Telegram login and
+saves the session, sends the owner a test DM to prove the command channel
+works, and finishes by printing the command to start the bot:
+
+```bash
+python3 main.py        # or venv/bin/python3 main.py if a venv was created
+```
+
+Prefer manual? `cp .env.example .env`, fill it in, and run `main.py` — the
+first run asks for phone + code interactively.
 
 The session is saved to `saviour.session` — it grants full access to the
 account, so **use a spare account** and never commit or share the file
@@ -134,7 +149,7 @@ In a channel: `.set` / `.set 3` claims the redirect post.
 
 ## Keep it running
 
-Log in once by hand first (the first run needs your phone + code), then:
+`setup.py` already logged the account in (the session file is ready), so:
 
 ```bash
 cp saviour.service /etc/systemd/system/
