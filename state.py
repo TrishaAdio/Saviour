@@ -118,8 +118,11 @@ class State:
     def post(self):
         return self.d["post"]
 
-    def set_post(self, chat_id, msg_id, slots):
+    def set_post(self, chat_id, msg_id, slots, template=None):
+        """``template``: the saved look of a post taken over with a reply .set."""
         self.d["post"] = {"chat": chat_id, "msg": msg_id, "slots": slots}
+        if template:
+            self.d["post"]["template"] = template
         self.d["waiting_set"] = None
 
     def forget_post(self):

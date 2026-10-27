@@ -151,26 +151,82 @@ async def ask_for_links_if_empty():
 
 
 # -------------------------------------------------------------- ".set" post
+# Three ways to use it, all posted in the redirect channel:
+#   .set              as a reply to a post -> take that post over, keep its look
+#   .set / .set 3     with a post already there -> keep editing that one
+#   .set / .set 3     no post yet -> publish a new default post
 SET = re.compile(r"^\s*\.set(?:\s+(\d+))?\s*$")
 
 
-async def try_post(chat_id, slots):
-    """Put the redirect post up if we're allowed to. Tells the owner if so."""
-    done, why = await engine.put_post(chat_id, slots)
+async def try_post(chat_id, slots, reply=None):
+    """Put the redirect post up (or take one over) if we're allowed to.
+
+    Tells the owner when it worked. False = not allowed yet, keep waiting.
+    """
+    old = state.post
+    if reply:
+        done, why, slots = await engine.adopt_post(chat_id, reply)
+    else:
+        done, why = await engine.put_post(chat_id, slots)
     if not done:
         log.info("can't post in %s yet: %s", chat_id, why)
+        if reply and why in ("that post is gone", "that post has no text",
+                             "that post has no t.me links to keep updated"):
+            # Not a rights problem: waiting won't fix it, so say so and stop.
+            state.waiting_set = None
+            await state.save()
+            await tell(ui.card("❌", "Can't take over that post", [
+                ui.kv("Channel", ui.esc(await name_of(chat_id))),
+                ui.kv("Why", ui.i(why)),
+            ], foot="Reply .set to a post that has your t.me links in it."))
+            return True
         return False
     # A channel can't redirect to itself.
     if state.get(chat_id):
         state.drop(chat_id)
         await state.save()
         log.info("took %s out of the pool: it holds the post now", chat_id)
-    await tell(ui.card("✅", "Redirect post is live", [
+
+    # Taking over a post replaces the one we made ourselves in the same
+    # channel - leaving it would show two redirect posts.
+    removed = False
+    if reply and old and old["chat"] == chat_id and old["msg"] != reply \
+            and not old.get("template"):
+        removed = await engine.delete_message(chat_id, old["msg"])
+
+    result = await engine.redraw_post()
+    rows = [ui.kv("Channel", ui.esc(await name_of(chat_id))),
+            ui.kv("ID", ui.code(chat_id))]
+    if reply:
+        rows += [ui.kv("Look", "your own post, kept exactly as it is"),
+                 ui.kv("Links", f"{slots} position(s), swapped automatically")]
+        if removed:
+            rows.append(ui.kv("Old post", "🗑 deleted (it was a duplicate)"))
+    else:
+        rows.append(ui.kv("Lines", str(slots)))
+    if result.startswith("error"):
+        rows.append(ui.kv("Post", ui.post_result(result)))
+    await tell(ui.card("✅", "Took over your post" if reply else "Redirect post is live",
+                       rows, foot="It updates itself whenever the links change."))
+    return True
+
+
+async def keep_existing(chat_id, slots, asked_slots):
+    """A plain .set where our post already is: edit that one, don't add another."""
+    post = state.post
+    if asked_slots and not post.get("template"):
+        post["slots"] = slots
+        await state.save()
+    result = await engine.redraw_post()
+    if result.startswith("error") or result in ("post-deleted", "none"):
+        return False                     # it's really gone: make a new one
+    await tell(ui.card("✏️", "Kept your existing post", [
         ui.kv("Channel", ui.esc(await name_of(chat_id))),
-        ui.kv("ID", ui.code(chat_id)),
-        ui.kv("Lines", str(slots)),
-    ], foot="It updates itself whenever the links change."))
-    await engine.redraw_post()
+        ui.kv("Post", ui.post_result(result)),
+        ui.kv("Lines", str(state.slots())),
+    ], text="A redirect post is already up here, so I updated it instead of "
+            "posting a second one.",
+        foot="To take over a different post, reply .set to it."))
     return True
 
 
@@ -191,24 +247,33 @@ async def on_set(event):
             and event.sender_id not in (config.OWNER_ID, engine.ME):
         return
     chat_id = event.chat_id
-    slots = int(event.pattern_match.group(1) or config.SLOTS)
+    asked = event.pattern_match.group(1)
+    slots = int(asked or config.SLOTS)
     slots = slots if 1 <= slots <= 20 else config.SLOTS
+    reply = event.message.reply_to_msg_id
 
-    # Remember it before anything else, so a restart can't lose the request.
-    state.waiting_set = {"chat": chat_id, "slots": slots}
-    await state.save()
     try:
         await event.delete()
     except (RPCError, *engine.HICCUP):
         pass
 
-    if await try_post(chat_id, slots):
+    if not reply and state.post and state.post["chat"] == chat_id:
+        if await keep_existing(chat_id, slots, bool(asked)):
+            return
+
+    # Remember it before going on, so a restart can't lose the request.
+    state.waiting_set = {"chat": chat_id, "slots": slots, "reply": reply}
+    await state.save()
+    if await try_post(chat_id, slots, reply):
         return
     await tell(ui.card("⏳", "Waiting for admin rights", [
         ui.kv("Channel", ui.esc(await name_of(chat_id))),
         ui.kv("ID", ui.code(chat_id)),
-    ], text=f"I saw your {ui.code('.set')} but I'm not admin there yet.",
-        foot="Promote me and the post goes up by itself."))
+    ], text=f"I saw your {ui.code('.set')} but I can't "
+            f"{'edit posts' if reply else 'post'} there yet.",
+        foot=("Promote me with Post + Edit Messages rights and I'll take the post "
+              "over by itself.") if reply else
+             "Promote me and the post goes up by itself."))
 
 
 # --------------------------------------------------- promoted / demoted / joined
@@ -248,8 +313,8 @@ async def on_membership(update):
         # The redirect channel: finish the ".set" that was waiting.
         if state.is_post_channel(chat_id):
             waiting = state.waiting_set
-            if waiting and not state.post:
-                await try_post(chat_id, waiting["slots"])
+            if waiting and (not state.post or waiting.get("reply")):
+                await try_post(chat_id, waiting["slots"], waiting.get("reply"))
             return
         if entity is None:
             return
@@ -307,8 +372,8 @@ async def round_now():
 async def one_round():
     # A ".set" whose promotion we never heard about is retried for ever.
     waiting = state.waiting_set
-    if waiting and not state.post:
-        await try_post(waiting["chat"], waiting["slots"])
+    if waiting and (not state.post or waiting.get("reply")):
+        await try_post(waiting["chat"], waiting["slots"], waiting.get("reply"))
 
     if not state.channels:
         await ask_for_links_if_empty()
@@ -495,8 +560,11 @@ async def cmd_help(event):
             ui.b("Cleanup"),
             ui.quote([row("/forget <id>", "drop a channel from my list"),
                       row(".clearall", "wipe the account (asks first)")]),
-            f"📌 In a channel, post {ui.code('.set')} (or {ui.code('.set 3')}) "
-            "to claim the redirect post.",
+            ui.b("In your channel"),
+            ui.quote([f"{ui.code('.set')} as a {ui.b('reply')} to a post — take it "
+                      "over, keep its look, swap only the links",
+                      f"{ui.code('.set')} / {ui.code('.set 3')} — new post (or update "
+                      "the one that's already there)"]),
         ],
         foot="Paste channel links here any time to add them."))
 
@@ -505,7 +573,8 @@ async def cmd_help(event):
 async def cmd_status(event):
     post = state.post
     if post:
-        post_row = f"live in {ui.code(post['chat'])}"
+        post_row = f"live in {ui.code(post['chat'])}" + (
+            " · your own design" if post.get("template") else "")
     elif state.waiting_set:
         post_row = f"⏳ waiting for admin in {ui.code(state.waiting_set['chat'])}"
     else:
@@ -627,6 +696,12 @@ async def cmd_slots(event):
     if not 1 <= want <= 20:
         await answer(event, ui.card("❌", "Out of range",
                                     foot="Pick a number between 1 and 20."))
+        return
+    if state.post and state.post.get("template"):
+        await answer(event, ui.card("ℹ️", "Your post decides this", [
+            ui.kv("Links", f"{state.slots()} position(s) in your post")],
+            foot="Edit the post to add or remove links, then reply .set to it "
+                 "again."))
         return
     if state.post:
         state.post["slots"] = want

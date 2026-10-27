@@ -32,6 +32,7 @@ from telethon.errors import (
 )
 
 import config
+import template
 from state import state
 
 log = logging.getLogger(__name__)
@@ -447,29 +448,97 @@ def post_text():
     return "\n".join(lines)
 
 
-async def put_post(chat_id, slots):
-    """Publish the redirect post. (done, why_not)."""
+def post_body(tpl=None):
+    """What to send: (text, kwargs) for send_message / edit_message.
+
+    With a template (a post taken over with a reply ".set") its own text and
+    formatting are rebuilt with today's link. Without one, the default post.
+    """
+    chosen = state.active_channel()
+    if tpl and chosen:
+        text, entities = template.render(tpl, chosen["link"])
+        return text, {"formatting_entities": entities,
+                      "link_preview": bool(tpl.get("preview"))}
+    if tpl:                    # nothing live: leave the old links standing
+        text, entities = tpl["text"], [template._build(e) for e in tpl["entities"]]
+        return text, {"formatting_entities": [e for e in entities if e],
+                      "link_preview": bool(tpl.get("preview"))}
+    return post_text(), {"parse_mode": "html"}
+
+
+async def _can_post(chat_id, need_edit=False):
+    """(entity, why_not)."""
     try:
         entity = await entity_of(chat_id)
     except (ValueError, RPCError, *HICCUP) as exc:
-        return False, f"cannot open the channel ({brief(exc)})"
+        return None, f"cannot open the channel ({brief(exc)})"
     try:
         rights = await rights_in(entity)
     except (RPCError, *HICCUP) as exc:
-        return False, f"could not read our rights ({brief(exc)})"
+        return None, f"could not read our rights ({brief(exc)})"
     if rights is None or not getattr(rights, "is_admin", False):
-        return False, "not an admin there yet"
+        return None, "not an admin there yet"
     if not getattr(rights, "post_messages", False):
-        return False, 'admin, but without the "Post Messages" right'
+        return None, 'admin, but without the "Post Messages" right'
+    if need_edit and not getattr(rights, "edit_messages", False):
+        return None, 'admin, but without the "Edit Messages of Others" right'
+    return entity, ""
+
+
+async def put_post(chat_id, slots, tpl=None):
+    """Publish the redirect post. (done, why_not).
+
+    A template made from a media post can't be re-sent (we don't have the
+    media), so a deleted one comes back as text with the same formatting.
+    """
+    entity, why = await _can_post(chat_id)
+    if entity is None:
+        return False, why
+    text, extra = post_body(tpl)
     try:
-        sent = await call(lambda: tg.send_message(entity, post_text(), parse_mode="html"),
+        sent = await call(lambda: tg.send_message(entity, text, **extra),
                           "publish post")
     except (RPCError, *HICCUP) as exc:
         return False, brief(exc)
-    state.set_post(chat_id, sent.id, slots)
+    state.set_post(chat_id, sent.id, slots, tpl)
     await state.save()
     log.info("redirect post is up in %s (message %s)", chat_id, sent.id)
     return True, ""
+
+
+async def adopt_post(chat_id, msg_id):
+    """Take over an existing post: keep its look, swap only its links.
+
+    (done, why_not, slots).
+    """
+    entity, why = await _can_post(chat_id, need_edit=True)
+    if entity is None:
+        return False, why, 0
+    try:
+        message = await call(lambda: tg.get_messages(entity, ids=msg_id), "read post")
+    except (RPCError, *HICCUP) as exc:
+        return False, f"could not read that post ({brief(exc)})", 0
+    if message is None:
+        return False, "that post is gone", 0
+    tpl = template.snapshot(message)
+    if tpl is None:
+        return False, "that post has no text", 0
+    slots = template.slot_count(tpl)
+    if not slots:
+        return False, "that post has no t.me links to keep updated", 0
+    state.set_post(chat_id, msg_id, slots, tpl)
+    await state.save()
+    log.info("took over post %s in %s (%s link slot(s))", msg_id, chat_id, slots)
+    return True, "", slots
+
+
+async def delete_message(chat_id, msg_id):
+    try:
+        await call(lambda: tg.delete_messages(chat_id, [msg_id]), "delete old post")
+        return True
+    except (ValueError, RPCError, *HICCUP) as exc:
+        log.info("could not delete %s in %s: %s", msg_id, chat_id, brief(exc))
+        return False
 
 
 async def redraw_post():
@@ -477,9 +546,9 @@ async def redraw_post():
     post = state.post
     if not post:
         return "none"
+    text, extra = post_body(post.get("template"))
     try:
-        await call(lambda: tg.edit_message(post["chat"], post["msg"], post_text(),
-                                            parse_mode="html"),
+        await call(lambda: tg.edit_message(post["chat"], post["msg"], text, **extra),
                    "edit post")
         return "updated"
     except MessageNotModifiedError:
@@ -492,7 +561,7 @@ async def redraw_post():
             state.forget_post()
             await state.save()
             return "post-deleted"
-        done, why = await put_post(post["chat"], post["slots"])
+        done, why = await put_post(post["chat"], post["slots"], post.get("template"))
         return "reposted" if done else f"error ({why})"
     except (RPCError, *HICCUP) as exc:
         return f"error ({brief(exc)})"
