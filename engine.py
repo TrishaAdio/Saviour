@@ -17,15 +17,18 @@ from telethon.errors import (
     ChannelInvalidError,
     ChannelPrivateError,
     ChatAdminRequiredError,
+    ChannelsTooMuchError,
     FloodWaitError,
     InviteHashExpiredError,
     InviteHashInvalidError,
+    InviteRequestSentError,
     MessageIdInvalidError,
     MessageNotModifiedError,
     RPCError,
     ServerError,
     SlowModeWaitError,
     TimedOutError,
+    UserAlreadyParticipantError,
     UserNotParticipantError,
 )
 
@@ -266,11 +269,85 @@ async def check(channel):
     return UNSURE, f"its invite link died; {detail}"
 
 
+# ------------------------------------------------------- joining from a link
+NOT_A_CHANNEL = "that is not a broadcast channel"
+JOIN_REFUSED = {
+    InviteHashExpiredError: "that invite link has expired or was revoked",
+    InviteHashInvalidError: "that invite link is not valid",
+    ChannelsTooMuchError: "I'm already in too many channels to join another",
+    ChannelPrivateError: "that channel is private, or I'm banned from it",
+}
+
+
+def _is_broadcast(chat):
+    return isinstance(chat, types.Channel) and getattr(chat, "broadcast", False)
+
+
+def _refused(exc):
+    for kind, why in JOIN_REFUSED.items():
+        if isinstance(exc, kind):
+            return why
+    return brief(exc)
+
+
+async def join_invite(code):
+    """Join a private channel from its invite code.
+
+    Returns (entity, joined_now, why_not). Groups are never joined.
+    """
+    try:
+        found = await call(
+            lambda: tg(functions.messages.CheckChatInviteRequest(code)),
+            f"check invite {code}")
+    except (RPCError, *HICCUP) as exc:
+        return None, False, _refused(exc)
+    if isinstance(found, types.ChatInviteAlready):
+        return found.chat, False, ""
+    if isinstance(found, types.ChatInvitePeek):
+        if not _is_broadcast(found.chat):
+            return None, False, NOT_A_CHANNEL
+    elif not getattr(found, "broadcast", False):
+        return None, False, NOT_A_CHANNEL
+    try:
+        updates = await call(
+            lambda: tg(functions.messages.ImportChatInviteRequest(code)),
+            f"join invite {code}")
+    except UserAlreadyParticipantError:
+        return None, False, "I'm already in it, but Telegram won't show it to me"
+    except InviteRequestSentError:
+        return None, False, ("this link needs approval: I sent a join request. "
+                             "Approve it, then promote me")
+    except (RPCError, *HICCUP) as exc:
+        return None, False, _refused(exc)
+    chat = next((c for c in getattr(updates, "chats", []) if _is_broadcast(c)), None)
+    if chat is None:
+        return None, False, "joined, but Telegram didn't say which channel it was"
+    log.info("joined %s (%s) from an invite link", chat.title, peer(chat))
+    return chat, True, ""
+
+
+async def join_public(entity):
+    """Join a public channel we are not in yet. (entity, joined_now, why_not)."""
+    if not _is_broadcast(entity):
+        return None, False, NOT_A_CHANNEL
+    if not getattr(entity, "left", False):
+        return entity, False, ""
+    try:
+        await call(lambda: tg(functions.channels.JoinChannelRequest(entity)),
+                   f"join {peer(entity)}")
+    except UserAlreadyParticipantError:
+        return entity, False, ""
+    except (RPCError, *HICCUP) as exc:
+        return None, False, _refused(exc)
+    log.info("joined %s (%s) from a public link", entity.title, peer(entity))
+    return entity, True, ""
+
+
 # ------------------------------------------------------------ joining the pool
 async def adopt(entity):
     """Check an entity over and put it in the pool. (added, why_not)."""
-    if not isinstance(entity, types.Channel) or not getattr(entity, "broadcast", False):
-        return False, "that is not a broadcast channel"
+    if not _is_broadcast(entity):
+        return False, NOT_A_CHANNEL
     cid = peer(entity)
     if state.is_post_channel(cid):
         return False, "that channel holds the redirect post"

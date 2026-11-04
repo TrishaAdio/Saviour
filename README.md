@@ -134,6 +134,20 @@ It names the user ID that was ignored. That's the ID `OWNER_ID` needs to be
 Paste channel links any time (`@name`, `t.me/name`, `+invite`, `-100…`) and
 they're checked and added. In a channel: `.set` claims the redirect post.
 
+### Auto-join from a link
+If the account isn't in a pasted channel yet, it **joins it on its own**
+(both `t.me/+invite` and public `t.me/name` links). The reply lists it under
+*👀 Joined, waiting for admin*. Promote it with **Invite Users via Link** and
+**Post Messages** and the channel is added by itself, as in step 1.
+
+- Only **broadcast channels** are joined. Group links are refused before
+  joining.
+- A link that needs approval sends a **join request**. Approve it, then
+  promote the account.
+- Expired or revoked links, and "too many channels", are reported as such.
+- Only links from your owner account are acted on. A `-100…` id can't be
+  joined; use a link for channels it isn't in.
+
 ### `.clearall`
 For starting over or retiring the account. `.clearall` shows what it will do;
 `.clearall confirm` does it: **deletes** every group/channel the account
