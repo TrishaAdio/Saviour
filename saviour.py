@@ -298,6 +298,9 @@ async def on_membership(update):
 
     # Joined, no rights yet: say so and wait. Nothing else happens.
     if joined and not promoted:
+        if chat_id in joined_from_dm:
+            joined_from_dm.discard(chat_id)
+            return
         await tell(ui.card("👀", "Joined a channel", [
             ui.kv("Name", ui.esc(title)),
             ui.kv("ID", ui.code(chat_id)),
@@ -600,7 +603,7 @@ async def cmd_help(event):
                       f"{ui.code('.set')} / {ui.code('.set 3')} — new post (or update "
                       "the one that's already there)"]),
         ],
-        foot="Paste channel links here any time to add them."))
+        foot="Paste channel links here any time: I join them and add them."))
 
 
 @owner
@@ -890,23 +893,30 @@ LOOKS_LIKE = re.compile(r"^(?:@[A-Za-z][A-Za-z0-9_]{3,}"
                         r"|-100\d{5,})$")
 
 
+joined_from_dm = set()
+
+
 async def find_channel(line):
-    """Turn one pasted line into a channel entity, or (None, why not)."""
+    """Turn one pasted line into a channel, joining it if I'm not in it yet.
+
+    Returns (entity, joined_now, why_not).
+    """
     try:
         if re.fullmatch(r"-100\d{5,}", line):
-            return await engine.entity_of(int(line)), ""
+            return await engine.entity_of(int(line)), False, ""
         code = engine.invite_code(line)
         if code:
-            answer_ = await engine.call(
-                lambda: tg(functions.messages.CheckChatInviteRequest(code)),
-                "check invite")
-            if isinstance(answer_, types.ChatInviteAlready):
-                return answer_.chat, ""
-            return None, "I haven't joined that one — add me to it first"
-        name = re.sub(r"^(?:https?://)?t\.me/", "", line).strip("/").lstrip("@")
-        return (await engine.entity_of(name), "") if name else (None, "not a channel")
+            entity, joined, why = await engine.join_invite(code)
+        else:
+            name = re.sub(r"^(?:https?://)?t\.me/", "", line).strip("/").lstrip("@")
+            if not name:
+                return None, False, "not a channel"
+            entity, joined, why = await engine.join_public(await engine.entity_of(name))
     except (ValueError, RPCError, *engine.HICCUP) as exc:
-        return None, engine.brief(exc)
+        return None, False, engine.brief(exc)
+    if joined:
+        joined_from_dm.add(engine.peer(entity))
+    return entity, joined, why
 
 
 async def on_dm(event):
@@ -921,15 +931,17 @@ async def on_dm(event):
 
     lines = lines[:ui.PER_PAGE]               # one report message is enough
     note = await answer(event, ui.card("🔎", f"Checking {len(lines)} link(s)…"))
-    good, bad = [], []
+    good, waiting, bad = [], [], []
     for line in lines:
-        entity, why = await find_channel(line)
+        entity, joined, why = await find_channel(line)
         if entity is None:
             bad.append(f"❌ {ui.code(line)}\n      ↳ {ui.i(why)}")
         else:
             added, why = await engine.adopt(entity)
             if added:
                 good.append(entity)
+            elif joined:
+                waiting.append(entity)
             else:
                 bad.append(f"❌ {ui.b(getattr(entity, 'title', None) or line)}\n"
                            f"      ↳ {ui.i(why)}")
@@ -940,6 +952,12 @@ async def on_dm(event):
         blocks += [ui.b(f"🟢 Loaded ({len(good)})"),
                    ui.quote([f"{ui.esc(e.title)}  {ui.code(engine.peer(e))}"
                              for e in good])]
+    if waiting:
+        blocks += [ui.b(f"👀 Joined, waiting for admin ({len(waiting)})"),
+                   ui.quote([f"{ui.esc(e.title)}  {ui.code(engine.peer(e))}"
+                             for e in waiting]
+                            + [ui.i("Promote me with Invite Users via Link and "
+                                    "Post Messages; each one is added by itself.")])]
     if bad:
         blocks += [ui.b(f"❌ Not loaded ({len(bad)})"), ui.quote(bad)]
     rows = []
@@ -949,7 +967,8 @@ async def on_dm(event):
                 ui.kv("Post", ui.post_result(await engine.redraw_post()))]
         if not state.post and not state.waiting_set:
             foot = "No redirect post yet — post .set in your public channel."
-    icon = "✅" if good and not bad else "⚠️" if good else "❌"
+    icon = ("✅" if good and not bad and not waiting else
+            "⚠️" if good or waiting else "❌")
     await rewrite(note, ui.card(icon, "Links checked", rows, extra=blocks, foot=foot))
     if good:
         await ask_for_links_if_empty()
