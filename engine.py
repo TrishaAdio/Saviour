@@ -17,6 +17,7 @@ from telethon.errors import (
     ChannelInvalidError,
     ChannelPrivateError,
     ChatAdminRequiredError,
+    ChatRestrictedError,
     ChannelsTooMuchError,
     FloodWaitError,
     InviteHashExpiredError,
@@ -41,7 +42,7 @@ log = logging.getLogger(__name__)
 # Telegram hiccupping. Never evidence that a channel is gone.
 HICCUP = (ServerError, TimedOutError, asyncio.TimeoutError, ConnectionError, OSError)
 # Telegram being definite: the channel is gone, or we are banned from it.
-GONE = (ChannelPrivateError, ChannelInvalidError)
+GONE = (ChannelPrivateError, ChannelInvalidError, ChatRestrictedError)
 
 # Verdicts from check().
 OK = "ok"              # verified working
@@ -49,6 +50,7 @@ RELINKED = "relinked"  # was broken, fixed itself with a fresh link
 DEAD = "dead"          # (kept for old data; check() no longer returns it)
 UNSURE = "unsure"      # no idea - change nothing
 GONE_FOR_SURE = "gone-for-sure"  # the "." test was refused: out of the post now
+REMOVE = "remove"
 
 tg = None        # the TelegramClient, set by connect_client()
 ME = 0           # our own user id
@@ -62,6 +64,7 @@ def bind(client, me_id):
 _SHORT = {
     "ChannelPrivateError": "the channel is private or deleted, or I was banned",
     "ChannelInvalidError": "the channel doesn't exist any more",
+    "ChatRestrictedError": "Telegram has restricted (banned) the channel",
     "ChatWriteForbiddenError": "I'm not allowed to post there",
     "ChatAdminRequiredError": "I'm missing an admin right",
     "UserBannedInChannelError": "I'm banned from posting there",
@@ -202,7 +205,7 @@ async def rotate_link(channel, entity):
 
 
 # ------------------------------------------------------------ the dot test
-ALIVE, GONE_NOW, NO_ANSWER = "alive", "gone", "no-answer"
+ALIVE, GONE_NOW, BANNED, NO_ANSWER = "alive", "gone", "banned", "no-answer"
 
 
 async def dot_test(target):
@@ -220,6 +223,8 @@ async def dot_test(target):
         sent = await call(lambda: tg.send_message(target, ".", silent=True), "dot test")
     except HICCUP as exc:
         return NO_ANSWER, f"Telegram didn't answer the test post ({brief(exc)})"
+    except GONE as exc:
+        return BANNED, f'a test "." post was refused ({brief(exc)})'
     except (RPCError, ValueError) as exc:
         return GONE_NOW, f'a test "." post was refused ({brief(exc)})'
     try:
@@ -237,7 +242,7 @@ async def _target(cid):
         pass
     try:
         return await entity_of(cid)
-    except (*GONE, ValueError):
+    except ValueError:
         return None
 
 
@@ -249,10 +254,14 @@ async def check(channel):
     """
     try:
         target = await _target(channel["id"])
+    except GONE as exc:
+        return REMOVE, brief(exc)
     except (RPCError, *HICCUP) as exc:
         return UNSURE, f"Telegram did not answer ({brief(exc)})"
 
     result, how = await dot_test(target)
+    if result == BANNED:
+        return REMOVE, how
     if result == GONE_NOW:
         return GONE_FOR_SURE, how
     if result == NO_ANSWER:
@@ -536,8 +545,11 @@ async def redraw_post():
     except MessageNotModifiedError:
         return "already-right"
     except GONE as exc:
-        log.error("lost access to the post channel %s: %s", post["chat"], brief(exc))
-        return f"error ({brief(exc)})"
+        log.error("lost access to the post channel %s: %s - forgetting the post",
+                  post["chat"], brief(exc))
+        state.forget_post()
+        await state.save()
+        return "post-lost"
     except MessageIdInvalidError:
         if not config.REPOST:
             state.forget_post()
