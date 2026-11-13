@@ -90,6 +90,13 @@ once**. Nothing else is ever changed: no bio, no name.
 Removed channels keep getting the `.` test; the moment one posts again it's
 back in the pool.
 
+**Channels Telegram has banned are caught before the `.` test.** A
+Terms-of-Service ban often still lets admins post, so the `.` would pass
+while visitors see *"this channel is banned"*. Every round the account reads
+the channel's ban flag from Telegram. A banned channel is removed straight
+away, and banned channels are refused when you paste or promote them. The
+redirect post's channel is checked the same way.
+
 **Banned, deleted or private channels are dropped from the list.** If
 Telegram answers *"the chat is restricted"* (banned by Telegram), *"the
 channel is private"* (deleted, or the account was kicked/banned) or *"the

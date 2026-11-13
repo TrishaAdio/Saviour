@@ -234,12 +234,17 @@ async def dot_test(target):
     return ALIVE, ""
 
 
-async def _target(cid):
-    """Something we can post to: the peer saved in the session, else a lookup."""
-    try:
-        return await tg.get_input_entity(cid)
-    except ValueError:
-        pass
+def ban_reason(entity):
+    """Why Telegram has banned this channel for the people who'd join it, or ""."""
+    if not getattr(entity, "restricted", False):
+        return ""
+    reasons = [f"{r.text or r.reason} ({r.platform})"
+               for r in getattr(entity, "restriction_reason", None) or []]
+    return "Telegram has banned the channel: " + ("; ".join(reasons) or "restricted")
+
+
+async def _fresh(cid):
+    """The channel as Telegram sees it right now, or None if it won't open."""
     try:
         return await entity_of(cid)
     except ValueError:
@@ -253,11 +258,14 @@ async def check(channel):
     Nothing else is ever changed in the channel - no bio, no name.
     """
     try:
-        target = await _target(channel["id"])
+        target = await _fresh(channel["id"])
     except GONE as exc:
         return REMOVE, brief(exc)
     except (RPCError, *HICCUP) as exc:
         return UNSURE, f"Telegram did not answer ({brief(exc)})"
+    banned = ban_reason(target)
+    if banned:
+        return REMOVE, banned
 
     result, how = await dot_test(target)
     if result == BANNED:
@@ -315,6 +323,8 @@ async def join_invite(code):
     if isinstance(found, types.ChatInvitePeek):
         if not _is_broadcast(found.chat):
             return None, False, NOT_A_CHANNEL
+        if ban_reason(found.chat):
+            return None, False, ban_reason(found.chat)
     elif not getattr(found, "broadcast", False):
         return None, False, NOT_A_CHANNEL
     try:
@@ -357,6 +367,8 @@ async def adopt(entity):
     """Check an entity over and put it in the pool. (added, why_not)."""
     if not _is_broadcast(entity):
         return False, NOT_A_CHANNEL
+    if ban_reason(entity):
+        return False, ban_reason(entity)
     cid = peer(entity)
     if state.is_post_channel(cid):
         return False, "that channel holds the redirect post"
@@ -398,7 +410,7 @@ async def discover():
         entity = chat.entity
         if not isinstance(entity, types.Channel) or not getattr(entity, "broadcast", False):
             continue
-        if getattr(entity, "left", False):
+        if getattr(entity, "left", False) or ban_reason(entity):
             continue
         cid = peer(entity)
         if state.is_post_channel(cid) or state.get(cid):
@@ -530,6 +542,22 @@ async def delete_message(chat_id, msg_id):
     except (ValueError, RPCError, *HICCUP) as exc:
         log.info("could not delete %s in %s: %s", msg_id, chat_id, brief(exc))
         return False
+
+
+async def drop_post_if_banned():
+    """Forget the post when Telegram has banned its channel. Returns the reason."""
+    post = state.post
+    if not post:
+        return ""
+    try:
+        why = ban_reason(await entity_of(post["chat"]))
+    except (ValueError, RPCError, *HICCUP):
+        return ""
+    if why:
+        log.error("post channel %s: %s - forgetting the post", post["chat"], why)
+        state.forget_post()
+        await state.save()
+    return why
 
 
 async def redraw_post():

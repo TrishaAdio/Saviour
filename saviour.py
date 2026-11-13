@@ -446,7 +446,10 @@ async def one_round():
     state.d["checked"] = int(time.time())
     await state.save()
     switched = bool(old and (old.get("offline") or not state.get(before)))
-    result = await engine.redraw_post()
+    if await engine.drop_post_if_banned():
+        result = "post-lost"
+    else:
+        result = await engine.redraw_post()
     log.info("round done: %s live, %s parked | newly parked %s, removed %s, "
              "relinked %s, recovered %s, unverified %s | post %s",
              len(state.live()), len(state.dead()), len(parked) + len(gone),
