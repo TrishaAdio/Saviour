@@ -114,6 +114,7 @@ def post_result(result):
         "none": "— no post yet",
         "reposted": "♻️ posted again",
         "post-deleted": "🗑 it was deleted",
+        "post-lost": "🔴 its channel is gone, post forgotten",
     }
     if result in words:
         return words[result]

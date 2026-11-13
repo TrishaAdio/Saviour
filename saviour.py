@@ -32,7 +32,7 @@ from telethon.tl import functions
 import config
 import engine
 import ui
-from engine import GONE_FOR_SURE, OK, RELINKED, UNSURE
+from engine import GONE_FOR_SURE, OK, RELINKED, REMOVE, UNSURE
 from state import state
 
 logging.basicConfig(
@@ -214,7 +214,7 @@ async def keep_existing(chat_id, slots, asked_slots):
         post["slots"] = slots
         await state.save()
     result = await engine.redraw_post()
-    if result.startswith("error") or result in ("post-deleted", "none"):
+    if result.startswith("error") or result in ("post-deleted", "post-lost", "none"):
         return False                     # it's really gone: make a new one
     await tell(ui.card("✏️", "Kept your existing post", [
         ui.kv("Channel", ui.esc(await name_of(chat_id))),
@@ -395,7 +395,9 @@ async def one_round():
         return
 
     before = (state.active_channel() or {}).get("id")
+    old = state.get(before) if before else None
     parked, gone, relinked, back, warned, unclear = [], [], [], [], [], 0
+    removed = []
     for channel in list(state.channels):
         try:
             verdict, note = await engine.check(channel)
@@ -415,6 +417,11 @@ async def one_round():
         elif verdict == UNSURE:
             unclear += 1
             log.info("%s unverified this round: %s", channel["id"], note)
+        elif verdict == REMOVE:
+            log.warning("%s removed from the list: %s", channel["id"], note)
+            channel["reason"] = note
+            state.drop(channel["id"])
+            removed.append(channel)
         elif verdict == GONE_FOR_SURE:
             # The dot test settled it: no strikes, no waiting.
             channel["strikes"] = config.STRIKES
@@ -438,13 +445,29 @@ async def one_round():
 
     state.d["checked"] = int(time.time())
     await state.save()
-    old = state.get(before) if before else None
-    switched = bool(old and old.get("offline"))
+    switched = bool(old and (old.get("offline") or not state.get(before)))
     result = await engine.redraw_post()
-    log.info("round done: %s live, %s parked | newly parked %s, relinked %s, "
-             "recovered %s, unverified %s | post %s",
-             len(state.live()), len(state.dead()), len(parked) + len(gone), len(relinked),
-             len(back), unclear, result)
+    log.info("round done: %s live, %s parked | newly parked %s, removed %s, "
+             "relinked %s, recovered %s, unverified %s | post %s",
+             len(state.live()), len(state.dead()), len(parked) + len(gone),
+             len(removed), len(relinked), len(back), unclear, result)
+
+    for chunk in ui.pages(removed):
+        if not chunk:
+            break
+        await tell(ui.card(
+            "🔴", "Removed from my list",
+            text="Telegram says these channels are banned, deleted or private:",
+            extra=[ui.quote([f"{ui.b(c['title'])}  {ui.code(c['id'])}\n"
+                             f"      ↳ {ui.i(c.get('reason') or 'unknown')}"
+                             for c in chunk]),
+                   ui.kv("Pool", f"{len(state.live())} live"),
+                   ui.kv("Post", ui.post_result(result))],
+            foot="They are no longer tested. Paste a link to add one back."))
+    if result == "post-lost":
+        await tell(ui.card("🔴", "Redirect post channel lost", [
+            ui.kv("Why", ui.i("the channel is banned, deleted or private")),
+        ], foot="I stopped monitoring it. Post .set in a new channel."))
 
     for channel in gone:
         await tell(ui.card("🔴", "Channel deleted — removed from the post", [
@@ -455,7 +478,7 @@ async def one_round():
             ui.kv("Pool", f"{len(state.live())} live"),
         ], foot="Kept in my list and re-tested every round — if it ever works "
                 "again it comes back by itself."))
-    if switched:
+    if switched and result != "post-lost":
         await tell_switch(old, result)
     for channel in warned:
         await tell(ui.card("🟠", "A channel failed a check", [

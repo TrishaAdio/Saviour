@@ -90,6 +90,16 @@ once**. Nothing else is ever changed: no bio, no name.
 Removed channels keep getting the `.` test; the moment one posts again it's
 back in the pool.
 
+**Banned, deleted or private channels are dropped from the list.** If
+Telegram answers *"the chat is restricted"* (banned by Telegram), *"the
+channel is private"* (deleted, or the account was kicked/banned) or *"the
+channel doesn't exist"*, the channel is removed for good and no longer
+tested. You get one *🔴 Removed from my list* message for the round. Paste
+its link again if you want it back. If this happens to the channel holding
+the redirect post, the post is forgotten and you're asked to `.set` a new
+one. Other refusals (for example a missing Post Messages right) still only
+park the channel.
+
 > The account needs the **Post Messages** right in every backup channel.
 > Without it the `.` is refused and the channel counts as deleted.
 
